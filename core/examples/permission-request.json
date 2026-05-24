@@ -1,0 +1,6 @@
+{
+  "request_id": "abcde",
+  "tool_name": "Bash",
+  "tool_input": "rm -rf /tmp/old-builds",
+  "session_id": "sess-01HZXP..."
+}

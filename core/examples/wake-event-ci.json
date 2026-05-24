@@ -1,0 +1,13 @@
+{
+  "v": 0,
+  "event_id": "01HZXP00000000000000000001",
+  "source": "github-actions",
+  "kind": "webhook",
+  "content": "CI build failed on branch main: test_timeout in tests/integration/test_auth.py",
+  "meta": {
+    "repo": "agent-wake",
+    "branch": "main",
+    "run_id": "123456789"
+  },
+  "wake": true
+}

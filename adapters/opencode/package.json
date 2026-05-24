@@ -1,0 +1,28 @@
+{
+  "name": "agent-wake-opencode",
+  "version": "0.0.1",
+  "description": "opencode plugin for agent-wake external event signaling",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "opencode": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "opencode": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.15.10",
+    "@types/node": "^22.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.5"
+  },
+  "license": "MIT"
+}

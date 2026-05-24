@@ -1,0 +1,12 @@
+{
+  "v": 0,
+  "event_id": "01HZXP00000000000000000004",
+  "source": "approval-system",
+  "kind": "approval_request",
+  "content": " approval requested for destructive action: delete database 'staging-old'",
+  "meta": {
+    "request_id": "req-abc-123",
+    "actor": "sf2-pipeline"
+  },
+  "wake": true
+}

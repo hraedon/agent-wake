@@ -1,0 +1,12 @@
+{
+  "v": 0,
+  "event_id": "01HZXP00000000000000000003",
+  "source": "telegram-bot",
+  "kind": "message",
+  "content": "User @alice says: can you check the latest deploy?",
+  "meta": {
+    "chat_id": "12345",
+    "user_id": "alice"
+  },
+  "wake": true
+}

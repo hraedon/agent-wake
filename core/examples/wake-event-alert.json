@@ -1,0 +1,12 @@
+{
+  "v": 0,
+  "event_id": "01HZXP00000000000000000002",
+  "source": "datadog",
+  "kind": "alert",
+  "content": "High memory usage detected on host prod-web-03. Usage: 94% for 5 minutes.",
+  "meta": {
+    "severity": "warning",
+    "host": "prod-web-03"
+  },
+  "wake": true
+}
