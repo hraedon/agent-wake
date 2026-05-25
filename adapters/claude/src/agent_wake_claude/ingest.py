@@ -93,9 +93,6 @@ class _Callback:
 class IngestHandler(http.server.BaseHTTPRequestHandler):
     """Handles POST / for incoming wake events."""
 
-    config: dict
-    emit_callback: _Callback
-
     def log_message(self, format, *args):
         # Suppress default logging to stderr
         pass
@@ -132,7 +129,7 @@ class IngestHandler(http.server.BaseHTTPRequestHandler):
         signature = self.headers.get("X-AgentWake-Signature", "")
         event_id_header = self.headers.get("X-AgentWake-Event-Id")
 
-        cfg = self.config
+        cfg = self.server.config
         source_cfg = cfg.get("sources", {}).get(source)
 
         if not source_cfg:
@@ -162,9 +159,10 @@ class IngestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            self.emit_callback(event)
+            self.server.emit_callback(event)
         except Exception as e:
-            self._send_json(500, {"error": f"forward failed: {e}"})
+            _log.error("emit_callback failed: %s", e)
+            self._send_json(500, {"error": "forward failed"})
             return
 
         self._send_json(202, {"status": "queued", "event_id": event_id})
@@ -185,7 +183,8 @@ class IngestHandler(http.server.BaseHTTPRequestHandler):
         try:
             handle_verdict(payload)
         except Exception as e:
-            self._send_json(500, {"error": f"verdict handler failed: {e}"})
+            _log.error("verdict handler failed: %s", e)
+            self._send_json(500, {"error": "verdict handler failed"})
             return
         self._send_json(202, {"status": "verdict received"})
 
@@ -193,9 +192,8 @@ class IngestHandler(http.server.BaseHTTPRequestHandler):
 class IngestServer(http.server.HTTPServer):
     def __init__(self, server_address, handler_class, config: dict, emit_callback: Callable[[dict], None]):
         super().__init__(server_address, handler_class)
-        self.handler = handler_class
-        self.handler.config = config
-        self.handler.emit_callback = _Callback(emit_callback)
+        self.config = config
+        self.emit_callback = _Callback(emit_callback)
 
 
 def start_listener(config: dict, emit_callback: Callable[[dict], None], return_server: bool = False) -> threading.Thread | IngestServer:

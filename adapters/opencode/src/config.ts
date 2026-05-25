@@ -13,9 +13,12 @@ export interface Config {
 
 import { readFileSync } from "fs";
 
-// NOTE: loadConfig reads from disk on each call—no caching. If caching is
-// added, document that config changes require a restart or signal.
-const DEFAULT_CONFIG_PATH = `${process.env.HOME || "/tmp"}/.config/agent-wake/config.json`;
+const DEFAULT_CONFIG_PATH = (() => {
+  if (!process.env.HOME) {
+    throw new Error("$HOME is not set; set AGENT_WAKE_CONFIG instead");
+  }
+  return `${process.env.HOME}/.config/agent-wake/config.json`;
+})();
 
 export function loadConfig(): Config {
   const configPath = process.env.AGENT_WAKE_CONFIG || DEFAULT_CONFIG_PATH;

@@ -13,29 +13,29 @@ function makeConfig(sources: Record<string, SourceConfig>, defaultCallbackUrl: s
 }
 
 describe("agent_wake_reply tool logic", () => {
-  test("returns graceful message when no callback_url configured", () => {
+  test("returns graceful message when no callback_url configured", async () => {
     const config = makeConfig({
       demo: { secret: new TextEncoder().encode("shhh"), callback_url: null },
     });
-    const result = postReply(config, "demo", "hello there");
+    const result = await postReply(config, "demo", "hello there");
     expect(result).toContain("no callback_url");
   });
 
-  test("returns sent when source callback_url is present", () => {
+  test("returns delivery failed when source callback_url is unreachable", async () => {
     const config = makeConfig({
       demo: { secret: new TextEncoder().encode("shhh"), callback_url: "http://127.0.0.1:1/cb" },
     });
-    const result = postReply(config, "demo", "test reply");
-    expect(result).toBe("sent");
+    const result = await postReply(config, "demo", "test reply");
+    expect(result).toContain("reply delivery failed");
   });
 
-  test("returns sent when using default_callback_url fallback", () => {
+  test("returns delivery failed when unreachable default_callback_url fallback", async () => {
     const config = makeConfig(
       { demo: { secret: new TextEncoder().encode("shhh"), callback_url: null } },
       "http://127.0.0.1:1/default"
     );
-    const result = postReply(config, "demo", "fallback reply");
-    expect(result).toBe("sent");
+    const result = await postReply(config, "demo", "fallback reply");
+    expect(result).toContain("reply delivery failed");
   });
 
   test("posts correct payload to callback server", async () => {
@@ -58,9 +58,8 @@ describe("agent_wake_reply tool logic", () => {
         },
       });
 
-      postReply(config, "demo", "test content", "evt-99");
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const result = await postReply(config, "demo", "test content", "evt-99");
+      expect(result).toBe("sent");
       expect(receivedBody).not.toBeNull();
       expect(receivedBody.v).toBe(0);
       expect(receivedBody.in_reply_to).toBe("evt-99");

@@ -35,10 +35,10 @@ def main() -> None:
         logger.error("config error: %s", e)
         sys.exit(1)
 
-    _ingest_server = start_listener(config, emit_wake_event, return_server=True)
-
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
+
+    _ingest_server = start_listener(config, emit_wake_event, return_server=True)
 
     try:
         server_main()

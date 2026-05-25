@@ -34,7 +34,7 @@ const agentWakeReply = tool({
     if (!pluginConfig) {
       return "agent-wake not configured";
     }
-    return postReply(pluginConfig, args.source, args.content, args.in_reply_to);
+    return await postReply(pluginConfig, args.source, args.content, args.in_reply_to);
   },
 });
 

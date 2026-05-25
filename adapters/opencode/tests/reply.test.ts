@@ -13,42 +13,42 @@ function makeConfig(sources: Record<string, SourceConfig>, defaultCallbackUrl: s
 }
 
 describe("postReply", () => {
-  test("returns graceful message when no callback_url configured", () => {
+  test("returns graceful message when no callback_url configured", async () => {
     const config = makeConfig({
       demo: { secret: new TextEncoder().encode("shhh"), callback_url: null },
     });
-    const result = postReply(config, "demo", "hello there");
+    const result = await postReply(config, "demo", "hello there");
     expect(result).toContain("no callback_url");
   });
 
-  test("returns graceful message when source is unknown and no default", () => {
+  test("returns graceful message when source is unknown and no default", async () => {
     const config = makeConfig({});
-    const result = postReply(config, "unknown_source", "hello");
+    const result = await postReply(config, "unknown_source", "hello");
     expect(result).toContain("no callback_url");
   });
 
-  test("returns graceful message when source has no callback and default is null", () => {
+  test("returns graceful message when source has no callback and default is null", async () => {
     const config = makeConfig({
       demo: { secret: new TextEncoder().encode("shhh"), callback_url: null },
     }, null);
-    const result = postReply(config, "demo", "any content");
+    const result = await postReply(config, "demo", "any content");
     expect(result).toContain("no callback_url");
   });
 
-  test("returns sent when source callback_url is present", () => {
+  test("returns delivery failed message when source callback_url is unreachable", async () => {
     const config = makeConfig({
       demo: { secret: new TextEncoder().encode("shhh"), callback_url: "http://127.0.0.1:1/source" },
     });
-    const result = postReply(config, "demo", "hello");
-    expect(result).toBe("sent");
+    const result = await postReply(config, "demo", "hello");
+    expect(result).toContain("reply delivery failed");
   });
 
-  test("returns sent when using default_callback_url", () => {
+  test("returns delivery failed message when using unreachable default_callback_url", async () => {
     const config = makeConfig(
       { demo: { secret: new TextEncoder().encode("shhh"), callback_url: null } },
       "http://127.0.0.1:1/default"
     );
-    const result = postReply(config, "demo", "hello");
-    expect(result).toBe("sent");
+    const result = await postReply(config, "demo", "hello");
+    expect(result).toContain("reply delivery failed");
   });
 });

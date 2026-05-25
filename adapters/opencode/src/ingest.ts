@@ -8,7 +8,11 @@ const log = {
 };
 
 function generateEventId(): string {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const ts = Date.now().toString(36);
+  return `${ts}${hex.slice(0, 16)}`;
 }
 
 const recentEventIds: string[] = [];
