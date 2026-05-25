@@ -43,9 +43,17 @@ export function buildWakeEvent(
   ) {
     const claimedSource = payload.source;
     if (claimedSource !== undefined && claimedSource !== source) {
-      throw new Error(
-        `event source mismatch: header says ${JSON.stringify(source)} but body says ${JSON.stringify(claimedSource)}`
-      );
+      // Throw a sentinel error; the HTTP layer logs details internally
+      // and returns a generic body to avoid leaking source names.
+      const err = new Error("source mismatch") as Error & {
+        headerSource?: string;
+        bodySource?: string;
+        sourceMismatch?: boolean;
+      };
+      err.headerSource = source;
+      err.bodySource = String(claimedSource);
+      err.sourceMismatch = true;
+      throw err;
     }
     return payload;
   }
@@ -120,7 +128,25 @@ export function startIngest(
         );
       }
 
-      const event = buildWakeEvent(bodyBytes, source, eventIdHeader);
+      let event: any;
+      try {
+        event = buildWakeEvent(bodyBytes, source, eventIdHeader);
+      } catch (e: any) {
+        if (e && e.sourceMismatch) {
+          log.warn(
+            `source mismatch: header=${JSON.stringify(e.headerSource)} body=${JSON.stringify(e.bodySource)}`
+          );
+          return new Response(JSON.stringify({ error: "source mismatch" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        log.error(`buildWakeEvent failed: ${e?.message ?? e}`);
+        return new Response(JSON.stringify({ error: "internal error" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       const eventId = event.event_id;
 
       if (isDuplicate(eventId)) {

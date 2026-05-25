@@ -2,6 +2,7 @@
 
 import json
 import http.server
+import logging
 import threading
 from typing import Callable
 
@@ -10,6 +11,21 @@ import ulid
 import sys
 
 from .gating import verify_signature
+
+_log = logging.getLogger("agent_wake_claude.ingest")
+
+
+class SourceMismatchError(ValueError):
+    """Raised when the body's claimed source does not match the authenticated header source.
+
+    Carries the offending values for warn-level logging, but the HTTP layer
+    must NOT surface them in the response body (information leak).
+    """
+
+    def __init__(self, header_source: str, body_source: str):
+        super().__init__("source mismatch")
+        self.header_source = header_source
+        self.body_source = body_source
 
 # In-memory dedupe window: last 256 event_ids (FIFO)
 _recent_event_ids: list[str] = []
@@ -46,9 +62,7 @@ def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict:
         # source from the header to prevent source spoofing.
         claimed_source = payload.get("source")
         if claimed_source is not None and claimed_source != source:
-            raise ValueError(
-                f"event source mismatch: header says {source!r} but body says {claimed_source!r}"
-            )
+            raise SourceMismatchError(source, str(claimed_source))
         return payload
 
     # Wrap arbitrary JSON
@@ -123,7 +137,18 @@ class IngestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(403, {"error": "unknown source or invalid signature"})
             return
 
-        event = _build_wake_event(raw_body, source, event_id_header)
+        try:
+            event = _build_wake_event(raw_body, source, event_id_header)
+        except SourceMismatchError as e:
+            # Log details internally; return a generic body to avoid leaking
+            # configured source names to an attacker who can forge bodies.
+            _log.warning(
+                "source mismatch: header=%r body=%r",
+                e.header_source,
+                e.body_source,
+            )
+            self._send_json(500, {"error": "source mismatch"})
+            return
         event_id = event["event_id"]
 
         if _is_duplicate(event_id):

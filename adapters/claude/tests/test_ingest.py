@@ -93,6 +93,61 @@ def test_ingest_wrapped_payload():
     assert ev["meta"] == {}
 
 
+def test_ingest_source_spoofing_returns_500_generic():
+    """A v0 event body whose `source` differs from the authenticated header
+    must be rejected fail-shut with a generic 500 body (no source-name leak).
+    """
+    config = {
+        "host": "127.0.0.1",
+        "port": 19880,
+        "sources": {
+            "real-source": {"secret": b"k1", "callback_url": None},
+            "secret-internal": {"secret": b"k2", "callback_url": None},
+        },
+    }
+
+    received = []
+    thread = start_listener(config, received.append)
+    time.sleep(0.3)
+
+    # Authenticated as "real-source" but body claims to be from "secret-internal".
+    body = json.dumps({
+        "v": 0,
+        "event_id": "spoof-001",
+        "source": "secret-internal",
+        "kind": "alert",
+        "content": "pwn",
+        "meta": {},
+        "wake": True,
+    }).encode()
+    sig = _hmac(b"k1", body)
+    req = urllib.request.Request(
+        "http://127.0.0.1:19880/",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-AgentWake-Source": "real-source",
+            "X-AgentWake-Signature": sig,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert False, f"expected 500, got {resp.status}"
+    except urllib.error.HTTPError as e:
+        assert e.code == 500
+        body_text = e.read().decode()
+        data = json.loads(body_text)
+        # Generic body — must NOT leak either source name
+        assert data == {"error": "source mismatch"}, data
+        assert "real-source" not in body_text
+        assert "secret-internal" not in body_text
+
+    # Event must NOT have been delivered
+    time.sleep(0.2)
+    assert received == []
+
+
 def test_ingest_invalid_signature():
     config = {
         "host": "127.0.0.1",

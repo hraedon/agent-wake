@@ -5,6 +5,36 @@ import {
   formatWakeEvent,
 } from "../src/ingest";
 
+describe("buildWakeEvent source spoofing", () => {
+  test("rejects v0 events whose body source differs from the header source", () => {
+    const body = new TextEncoder().encode(
+      JSON.stringify({
+        v: 0,
+        event_id: "spoof-1",
+        source: "secret-internal",
+        kind: "alert",
+        content: "pwn",
+        meta: {},
+        wake: true,
+      })
+    );
+    let caught: any = null;
+    try {
+      buildWakeEvent(body, "real-source", null);
+    } catch (e: any) {
+      caught = e;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught.sourceMismatch).toBe(true);
+    expect(caught.headerSource).toBe("real-source");
+    expect(caught.bodySource).toBe("secret-internal");
+    // Public message must NOT leak the source names.
+    expect(caught.message).toBe("source mismatch");
+    expect(caught.message).not.toContain("real-source");
+    expect(caught.message).not.toContain("secret-internal");
+  });
+});
+
 describe("buildWakeEvent", () => {
   test("passes through a valid v0 wake event", () => {
     const body = new TextEncoder().encode(
