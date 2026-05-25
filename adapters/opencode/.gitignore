@@ -2,6 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Lockfile policy: bun is the package manager. bun.lockb (or bun.lock)
+# is the source of truth. npm's package-lock.json is incidental and not
+# tracked.
+package-lock.json
+
 # Local environment overrides
 .env
 .env.*

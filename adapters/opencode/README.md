@@ -2,6 +2,9 @@
 
 opencode plugin for agent-wake external event signaling.
 
+> **Package manager:** bun. `bun.lockb` is the source of truth.
+> `package-lock.json` is npm-incidental and gitignored.
+
 ## Install
 
 From the repo root:
@@ -92,6 +95,49 @@ send a reply back to the event source. Replies are POSTed to the source's
 bun test
 npx tsc --noEmit
 ```
+
+## Secret management
+
+The adapter uses per-source HMAC-SHA256 shared secrets. Secrets live in
+environment variables (referenced from `config.json` via `secret_env`) and
+must never be written to `config.json` itself.
+
+**Generate a secret:**
+
+```bash
+python ../../tools/generate-secret.py
+```
+
+This prints a 64-character hex string from `secrets.token_hex(32)`. Set it
+as the environment variable named in your config's `secret_env` field. A
+template is provided at `.env.example` — copy it to `.env` and fill in
+values. Both `.env` files are gitignored.
+
+**Rotation (v0):**
+
+v0 has no zero-downtime rotation. To rotate a secret:
+
+1. Stop the adapter (and opencode if it's running).
+2. Generate a new secret with `generate-secret.py`.
+3. Update the env var in `.env` (and re-export it in the running shell).
+4. Restart opencode so the plugin reloads with the new secret.
+5. Update all senders (GitHub Actions, webhooks, etc.) to use the new
+   secret. Senders signing with the old secret will be rejected with 403.
+
+Any in-flight events signed with the old secret are dropped; senders
+should retry per the schema's retry guidance.
+
+**File permissions:**
+
+If you store secrets in an env file rather than your shell rc, set its
+permissions to `0600`:
+
+```bash
+chmod 600 .env
+```
+
+The adapter does not enforce this — it reads from `process.env`. The
+0600 advisory applies to the file you source the env from.
 
 ## Known v0 limitations
 

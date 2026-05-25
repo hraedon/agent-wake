@@ -3,7 +3,29 @@
 
 Launches the adapter in a subprocess, mocks stdin/stdout to complete MCP
 initialization, then POSTs a wake event to the HTTP listener and checks that
-a channel notification was emitted."""
+a channel notification was emitted.
+
+This effectively dry-runs the full adapter (HTTP ingest -> HMAC -> wrap ->
+channel notification emit) without requiring a live Claude Code session.
+It is the closest thing to acceptance-criterion §9 item 8 that can run in
+CI / on a dev box without the harness.
+
+To drive against a real Claude Code session instead (manual hand-test):
+
+  1. Generate a secret:
+       python tools/generate-secret.py
+     export it as $AGENT_WAKE_DEMO_SECRET.
+  2. Write a config to ~/.config/agent-wake/config.json with a `demo`
+     source whose secret_env is AGENT_WAKE_DEMO_SECRET (see
+     adapters/claude/.env.example and adapters/claude/README.md).
+  3. Launch Claude Code with the adapter loaded:
+       claude --dangerously-load-development-channels server:agent-wake-claude
+  4. Send a wake event with the curl one-liner in adapters/claude/README.md
+     and confirm the <channel ...> tag appears in the agent's context.
+
+Run mode: this script always launches its own adapter subprocess; it does
+not talk to a running adapter. Run as `python tools/fakechat-test.py` and
+expect `PASS: fakechat-test end-to-end` on success."""
 
 import json
 import os
