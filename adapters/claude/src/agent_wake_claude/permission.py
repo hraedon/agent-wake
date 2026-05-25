@@ -34,6 +34,8 @@ def _forward_permission_request(payload: dict, callback_url: str) -> None:
         with urllib.request.urlopen(req, timeout=30) as resp:
             _ = resp.read()
     except Exception:
+        # Best-effort: permission forwarding may fail silently.
+        # TODO: Add structured logging if/when substrate integration lands.
         pass
 
 

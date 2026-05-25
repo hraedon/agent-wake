@@ -1,0 +1,22 @@
+{
+  "version": 0,
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8788
+  },
+  "sources": {
+    "demo": {
+      "secret_env": "AGENT_WAKE_DEMO_SECRET",
+      "callback_url": null
+    },
+    "github-actions": {
+      "secret_env": "AGENT_WAKE_GITHUB_SECRET",
+      "callback_url": null
+    },
+    "telegram-bot": {
+      "secret_env": "AGENT_WAKE_TELEGRAM_SECRET",
+      "callback_url": "https://api.telegram.org/bot<YOUR-BOT-TOKEN>/sendMessage"
+    }
+  },
+  "default_callback_url": null
+}

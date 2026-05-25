@@ -2,43 +2,71 @@
 
 opencode plugin for agent-wake external event signaling.
 
-## Setup
+## Install
 
-1. Install dependencies and build:
-   ```bash
-   cd adapters/opencode
-   bun install     # or npm install
-   bun run build   # or npm run build
-   ```
+From the repo root:
 
-2. Generate a shared HMAC secret:
+```bash
+cd adapters/opencode
+bun install
+bun run build
+```
+
+This produces `dist/index.js`.
+
+## Configure
+
+1. Generate a shared HMAC secret:
    ```bash
    python ../../tools/generate-secret.py
    ```
+   Export it as an environment variable (e.g., `export AGENT_WAKE_DEMO_SECRET=<output>`).
 
-3. Create a config file at `~/.config/agent-wake/config.json`.
+2. Create `~/.config/agent-wake/config.json` (or set `AGENT_WAKE_CONFIG` to a custom path):
 
-4. Add the built plugin to your opencode configuration:
    ```json
    {
-     "plugins": [
-       "./adapters/opencode/dist/index.js"
+     "version": 0,
+     "listen": {"host": "127.0.0.1", "port": 8789},
+     "sources": {
+       "demo": {
+         "secret_env": "AGENT_WAKE_DEMO_SECRET",
+         "callback_url": null
+       }
+     },
+     "default_callback_url": null
+   }
+   ```
+
+   See [`core/schema.md`](../../core/schema.md) for the full config spec and
+   [`core/examples/config.json`](../../core/examples/config.json) for a ready-to-copy example.
+
+3. Add the plugin to your opencode config (`~/.config/opencode/opencode.json`):
+
+   ```json
+   {
+     "plugin": [
+       "/absolute/path/to/agent-wake/adapters/opencode/dist/index.js"
      ]
    }
    ```
 
-## Sending a test wake event
-
-Run the demo script in `examples/demo.sh` or craft a curl manually:
+## Send a test wake event
 
 ```bash
-BODY='{"v":0,"event_id":"01HZXPDEMO0000000000000002","source":"demo","kind":"alert","content":"hello","wake":true}'
-SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
-curl -X POST http://127.0.0.1:8789/ \
+BODY='{"v":0,"event_id":"01HZXPDEMO0000000000000002","source":"demo","kind":"alert","content":"hello","wake":true,"meta":{}}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AGENT_WAKE_DEMO_SECRET" | awk '{print $2}')
+curl -s -X POST http://127.0.0.1:8789/ \
   -H "Content-Type: application/json" \
   -H "X-AgentWake-Source: demo" \
   -H "X-AgentWake-Signature: sha256=$SIG" \
   -d "$BODY"
+```
+
+Or run the demo script:
+
+```bash
+bash examples/demo.sh
 ```
 
 ## Session tracking
@@ -51,6 +79,19 @@ is deferred to v1.
 
 opencode supports `noReply: true` when `wake` is false, so silent-inject events
 are delivered without triggering an agent turn.
+
+## Reply tool
+
+The adapter registers an `agent_wake_reply` tool that the agent can call to
+send a reply back to the event source. Replies are POSTed to the source's
+`callback_url` (best-effort in v0).
+
+## Test
+
+```bash
+bun test
+npx tsc --noEmit
+```
 
 ## Known v0 limitations
 

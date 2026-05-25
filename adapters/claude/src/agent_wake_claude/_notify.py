@@ -5,7 +5,7 @@ import json
 import sys
 import threading
 
-_stdout_lock = threading.Lock()
+_stdout_lock = threading.RLock()
 
 
 def send(msg: dict) -> None:

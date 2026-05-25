@@ -3,9 +3,10 @@ import { verifySignature } from "../src/gating";
 import { loadConfig, type Config, type SourceConfig } from "../src/config";
 import { startIngest } from "../src/ingest";
 
+import { createHmac } from "crypto";
+
 function hmacSign(secret: string, body: Uint8Array): string {
-  const crypto = require("crypto");
-  return "sha256=" + crypto.createHmac("sha256", secret).update(body).digest("hex");
+  return "sha256=" + createHmac("sha256", secret).update(body).digest("hex");
 }
 
 function makeConfig(port: number): Config {
@@ -185,5 +186,186 @@ describe("HTTP ingest endpoint", () => {
   test("returns 405 for GET", async () => {
     const res = await fetch(`http://127.0.0.1:${testPort}/`);
     expect(res.status).toBe(405);
+  });
+});
+
+describe("HTTP ingest edge cases", () => {
+  let server: any;
+  const edgePort = 18790;
+  const edgeReceived: any[] = [];
+
+  beforeAll(() => {
+    const ctx = {
+      client: {
+        session: {
+          prompt: async (opts: any) => {
+            edgeReceived.push(opts);
+          },
+        },
+      },
+    };
+    const activeSessions = new Set<string>(["session-edge"]);
+    const config = makeConfig(edgePort);
+    server = startIngest(ctx, config, activeSessions);
+  });
+
+  afterAll(() => {
+    if (server && server.stop) {
+      server.stop();
+    }
+  });
+
+  test("handles malformed JSON body by wrapping as webhook", async () => {
+    const raw = "this is not json {{{";
+    const sig = hmacSign("shhh", new TextEncoder().encode(raw));
+
+    const res = await fetch(`http://127.0.0.1:${edgePort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AgentWake-Source": "demo",
+        "X-AgentWake-Signature": sig,
+        "X-AgentWake-Event-Id": "evt-malformed",
+      },
+      body: raw,
+    });
+
+    expect(res.status).toBe(202);
+    const data = await res.json();
+    expect(data.status).toBe("queued");
+
+    await new Promise((r) => setTimeout(r, 200));
+    const last = edgeReceived[edgeReceived.length - 1];
+    expect(last.body.parts[0].text).toContain("this is not json");
+  });
+
+  test("delivers wake=false as noReply prompt", async () => {
+    const body = JSON.stringify({
+      v: 0,
+      event_id: "evt-silent-edge",
+      source: "demo",
+      kind: "info",
+      content: "fyi",
+      meta: {},
+      wake: false,
+    });
+    const sig = hmacSign("shhh", new TextEncoder().encode(body));
+
+    const res = await fetch(`http://127.0.0.1:${edgePort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AgentWake-Source": "demo",
+        "X-AgentWake-Signature": sig,
+      },
+      body,
+    });
+
+    expect(res.status).toBe(202);
+
+    await new Promise((r) => setTimeout(r, 200));
+    const last = edgeReceived[edgeReceived.length - 1];
+    expect(last.body.noReply).toBe(true);
+  });
+
+  test("accepts large body", async () => {
+    const bigContent = "y".repeat(100_000);
+    const body = JSON.stringify({
+      v: 0,
+      event_id: "evt-big-edge",
+      source: "demo",
+      kind: "webhook",
+      content: bigContent,
+      meta: {},
+      wake: true,
+    });
+    const sig = hmacSign("shhh", new TextEncoder().encode(body));
+
+    const res = await fetch(`http://127.0.0.1:${edgePort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AgentWake-Source": "demo",
+        "X-AgentWake-Signature": sig,
+      },
+      body,
+    });
+
+    expect(res.status).toBe(202);
+  });
+
+  test("returns 202 queued when no active sessions", async () => {
+    const noSessionPort = 18791;
+    const ctx = {
+      client: {
+        session: {
+          prompt: async () => {},
+        },
+      },
+    };
+    const emptySessions = new Set<string>();
+    const localServer = startIngest(ctx, makeConfig(noSessionPort), emptySessions);
+
+    try {
+      const body = JSON.stringify({
+        v: 0,
+        event_id: "evt-no-sessions",
+        source: "demo",
+        kind: "alert",
+        content: "no one listening",
+        meta: {},
+        wake: true,
+      });
+      const sig = hmacSign("shhh", new TextEncoder().encode(body));
+
+      const res = await fetch(`http://127.0.0.1:${noSessionPort}/`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-AgentWake-Source": "demo",
+          "X-AgentWake-Signature": sig,
+        },
+        body,
+      });
+
+      expect(res.status).toBe(202);
+      const data = await res.json();
+      expect(data.status).toBe("queued");
+    } finally {
+      if (localServer && localServer.stop) {
+        localServer.stop();
+      }
+    }
+  });
+
+  test("rejects missing source header with 403", async () => {
+    const body = JSON.stringify({ v: 0, event_id: "x", kind: "alert", content: "x" });
+
+    const res = await fetch(`http://127.0.0.1:${edgePort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AgentWake-Signature": "sha256=" + "a".repeat(64),
+      },
+      body,
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  test("rejects invalid signature format with 403", async () => {
+    const body = JSON.stringify({ v: 0, event_id: "x", source: "demo", kind: "alert", content: "x" });
+
+    const res = await fetch(`http://127.0.0.1:${edgePort}/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AgentWake-Source": "demo",
+        "X-AgentWake-Signature": "not-sha256-format",
+      },
+      body,
+    });
+
+    expect(res.status).toBe(403);
   });
 });

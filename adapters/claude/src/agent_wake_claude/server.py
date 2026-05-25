@@ -97,4 +97,15 @@ def main() -> None:
         except Exception:
             # Log to stderr and continue; do not crash the server on a bad message.
             import traceback
+
             traceback.print_exc(file=sys.stderr)
+            # If the message was a request (has id) and we haven't replied yet,
+            # send an internal-error response so the client isn't left hanging.
+            try:
+                req_id = msg.get("id")
+                if req_id is not None:
+                    _error(
+                        req_id, -32603, "Internal error — check adapter logs"
+                    )
+            except Exception:
+                traceback.print_exc(file=sys.stderr)

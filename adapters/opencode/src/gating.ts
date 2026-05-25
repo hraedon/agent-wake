@@ -1,3 +1,5 @@
+import { createHmac } from "crypto";
+
 export function verifySignature(
   body: Uint8Array,
   secret: Uint8Array,
@@ -11,7 +13,6 @@ export function verifySignature(
   const expectedHex = expected.slice(7);
   if (expectedHex.length !== 64) return false;
 
-  // Simple hex decode
   const expectedBytes = new Uint8Array(32);
   for (let i = 0; i < 64; i += 2) {
     const byte = parseInt(expectedHex.substring(i, i + 2), 16);
@@ -19,11 +20,7 @@ export function verifySignature(
     expectedBytes[i / 2] = byte;
   }
 
-  const key = require("crypto").createSecretKey(secret);
-  const hmac = require("crypto")
-    .createHmac("sha256", key)
-    .update(body)
-    .digest();
+  const hmac = createHmac("sha256", secret).update(body).digest();
 
   if (hmac.length !== expectedBytes.length) return false;
   let result = 0;

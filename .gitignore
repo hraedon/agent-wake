@@ -27,3 +27,7 @@ dist/
 
 # Temporary test artifacts
 *.tmp
+
+# Local environment overrides
+.env
+.env.*

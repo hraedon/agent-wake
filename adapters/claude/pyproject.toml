@@ -9,13 +9,16 @@ authors = [
   {name = "agent-wake contributors"}
 ]
 dependencies = [
-  "ulid-py>=1.1",
+    "ulid-py>=1.1",
 ]
+
+[project.scripts]
+agent-wake-claude = "agent_wake_claude.__main__:main"
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.0",
-  "httpx>=0.27",
+    "pytest>=8.0",
+    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]

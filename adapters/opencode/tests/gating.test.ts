@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { createHmac } from "crypto";
 import { verifySignature } from "../src/gating";
 
 function hmacSign(secret: string, body: Uint8Array): string {
-  const crypto = require("crypto");
   return (
     "sha256=" +
-    crypto.createHmac("sha256", secret).update(body).digest("hex")
+    createHmac("sha256", secret).update(body).digest("hex")
   );
 }
 

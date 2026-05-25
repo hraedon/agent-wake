@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "=== agent-wake-claude curl demo ==="
 
 # Generate a test secret
-SECRET=$(python3 "$SCRIPT_DIR/../../../../tools/generate-secret.py")
+SECRET=$(python3 "$SCRIPT_DIR/../../../tools/generate-secret.py")
 echo "Generated secret: $SECRET"
 
 # Write a temporary config file

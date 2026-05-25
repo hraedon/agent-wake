@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
-
-const {
+import {
   buildWakeEvent,
-  isDuplicate: _isDuplicate,
+  isDuplicate as _isDuplicate,
   formatWakeEvent,
-} = require("../src/ingest");
+} from "../src/ingest";
 
 describe("buildWakeEvent", () => {
   test("passes through a valid v0 wake event", () => {

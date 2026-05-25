@@ -42,6 +42,13 @@ def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict:
 
     if isinstance(payload, dict) and payload.get("v") == 0 and "event_id" in payload:
         # Pass-through: already a v0 wake event.
+        # Enforce that the body's claimed source matches the authenticated
+        # source from the header to prevent source spoofing.
+        claimed_source = payload.get("source")
+        if claimed_source is not None and claimed_source != source:
+            raise ValueError(
+                f"event source mismatch: header says {source!r} but body says {claimed_source!r}"
+            )
         return payload
 
     # Wrap arbitrary JSON
@@ -160,10 +167,12 @@ class IngestServer(http.server.HTTPServer):
         self.handler.emit_callback = _Callback(emit_callback)
 
 
-def start_listener(config: dict, emit_callback: Callable[[dict], None]) -> threading.Thread:
+def start_listener(config: dict, emit_callback: Callable[[dict], None], return_server: bool = False) -> threading.Thread | IngestServer:
     """Start the HTTP ingest listener in a background thread.
 
-    Returns the Thread object so the caller can inspect it.
+    Returns the Thread object by default. If return_server is True, returns
+    the IngestServer instance (which has a .shutdown() method for graceful
+    teardown).
     """
     server = IngestServer(
         (config["host"], config["port"]),
@@ -173,4 +182,4 @@ def start_listener(config: dict, emit_callback: Callable[[dict], None]) -> threa
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return thread
+    return server if return_server else thread

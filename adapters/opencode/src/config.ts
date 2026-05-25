@@ -11,6 +11,8 @@ export interface Config {
   default_callback_url: string | null;
 }
 
+import { readFileSync } from "fs";
+
 // NOTE: loadConfig reads from disk on each call—no caching. If caching is
 // added, document that config changes require a restart or signal.
 const DEFAULT_CONFIG_PATH = `${process.env.HOME || "/tmp"}/.config/agent-wake/config.json`;
@@ -20,8 +22,7 @@ export function loadConfig(): Config {
 
   let raw: any;
   try {
-    const fs = require("fs");
-    raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    raw = JSON.parse(readFileSync(configPath, "utf-8"));
   } catch (e: any) {
     throw new Error(`Failed to load config from ${configPath}: ${e.message}`);
   }

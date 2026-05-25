@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install agent-wake-claude
+        run: pip install -e ".[dev]"
+        working-directory: adapters/claude
+      - name: Run unit tests
+        run: python -m pytest tests/ -v --tb=short
+        working-directory: adapters/claude
+      - name: Run fakechat end-to-end test
+        run: python tools/fakechat-test.py
+        working-directory: .
+      - name: Verify installability
+        # Use the adapter directory directly; pip install from repo root makes hatchling look for pyproject.toml there.
+        run: pip install ./adapters/claude && python -c "import agent_wake_claude; print(agent_wake_claude.__version__)"
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install and build agent-wake-opencode
+        run: bun install && bun run build
+        working-directory: adapters/opencode
+      - name: Run tests
+        run: bun test
+        working-directory: adapters/opencode
+      - name: Type-check
+        run: bun run tsc --noEmit
+        working-directory: adapters/opencode

@@ -41,6 +41,12 @@ export function buildWakeEvent(
     payload.v === 0 &&
     typeof payload.event_id === "string"
   ) {
+    const claimedSource = payload.source;
+    if (claimedSource !== undefined && claimedSource !== source) {
+      throw new Error(
+        `event source mismatch: header says ${JSON.stringify(source)} but body says ${JSON.stringify(claimedSource)}`
+      );
+    }
     return payload;
   }
 
@@ -59,14 +65,22 @@ export function formatWakeEvent(event: any): string {
   const source = event.source || "";
   const kind = event.kind || "";
   const content = event.content || "";
-  return `<wake source="${source}" kind="${kind}">\n${content}\n</wake>`;
+  // Escape XML special chars in source/kind/content to prevent injection
+  const esc = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  return `<wake source="${esc(source)}" kind="${esc(kind)}">\n${esc(content)}\n</wake>`;
 }
 
 export function startIngest(
   ctx: any,
   config: Config,
   activeSessions: Set<string>
-) {
+): any {
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
@@ -145,4 +159,5 @@ export function startIngest(
   });
 
   log.info(`ingest listening on ${config.host}:${config.port}`);
+  return server;
 }

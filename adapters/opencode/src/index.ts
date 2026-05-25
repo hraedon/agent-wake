@@ -2,7 +2,8 @@ import { loadConfig, Config } from "./config";
 import { startIngest } from "./ingest";
 import { tool } from "@opencode-ai/plugin";
 import { postReply } from "./reply";
-import { z } from "zod";
+
+const z = tool.schema;
 
 type PluginContext = any;
 type Hooks = any;

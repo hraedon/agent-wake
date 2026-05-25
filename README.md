@@ -5,8 +5,6 @@ External-to-session signaling for agent harnesses. Push external events
 running agent session — either to wake the agent for an immediate turn,
 or to silently inject context for the next turn.
 
-Working name. Status: scaffolding, no implementation yet.
-
 ## Why
 
 Today, agent sessions are reactive only to the operator at the terminal.
@@ -20,14 +18,47 @@ agent-wake is the harness-adapter layer: one event schema, one set of
 ingest mechanisms, per-harness adapters that translate to the native
 wake primitive.
 
-## Scope
+## What's here
 
-- **In scope**: harness adapters (Claude Code channel plugin, opencode
-  plugin), shared event schema, ingest mechanisms (HTTP, substrate hook
-  consumer), wake / silent-inject modes.
-- **Out of scope (for now)**: pipeline orchestration (sf2's job),
-  durable event storage (substrate's job), action audit (agent-provenance's
-  job). agent-wake composes with these, doesn't replicate them.
+| Component | Status | Language |
+|---|---|---|
+| [`core/`](core/) | Shared wire format (docs + examples) | — |
+| [`adapters/claude/`](adapters/claude/) | Claude Code channel plugin (MCP stdio) | Python 3.11+ |
+| [`adapters/opencode/`](adapters/opencode/) | opencode plugin (in-process) | TypeScript / Bun |
+| [`tools/`](tools/) | `generate-secret.py`, `fakechat-test.py` | Python 3 |
+| [`examples/`](examples/) | Real-world integration guides | — |
+
+## Quick start
+
+1. Generate a shared HMAC secret:
+   ```bash
+   python tools/generate-secret.py
+   ```
+   Export it: `export AGENT_WAKE_DEMO_SECRET=<output>`
+
+2. Write a config at `~/.config/agent-wake/config.json` (see [`core/schema.md`](core/schema.md) §Configuration or [`core/examples/config.json`](core/examples/config.json)).
+
+3. Install and run the adapter for your harness:
+
+   **Claude Code:**
+   ```bash
+   cd adapters/claude && pip install -e .
+   claude --dangerously-load-development-channels server:agent-wake-claude
+   ```
+
+   **opencode:**
+   ```bash
+   cd adapters/opencode && bun install && bun run build
+   # Then add the plugin path to ~/.config/opencode/opencode.json:
+   #   "plugin": ["/path/to/agent-wake/adapters/opencode/dist/index.js"]
+   ```
+
+   See adapter-specific docs: [`adapters/claude/README.md`](adapters/claude/README.md) · [`adapters/opencode/README.md`](adapters/opencode/README.md)
+
+4. Send a test event:
+   ```bash
+   bash adapters/claude/examples/demo.sh
+   ```
 
 ## Architecture sketch
 
@@ -44,34 +75,31 @@ Running agent session
 ```
 
 **Per-harness adapter:**
-- Claude Code: channel plugin emitting `notifications/claude/channel`
-  with `{ content, meta }`. Requires `--dangerously-load-development-channels`
-  during the research preview.
-- opencode: plugin calling `client.session.prompt({ noReply: false, parts })`.
-  In-process, no allowlist friction.
+- Claude Code: channel plugin emitting `notifications/claude/channel` with `{ content, meta }`. Requires `--dangerously-load-development-channels server:agent-wake-claude` during the research preview.
+- opencode: plugin calling `client.session.prompt({ noReply: false, parts })`. In-process, no allowlist friction.
 
-**Composition with substrate** (preferred path for durable triggers):
-External event → substrate (signed, replayable) → substrate hook → agent-wake
-adapter → harness. Gets you a signed, replayable audit trail of every wake,
-which is itself a provenance primitive.
+## Scope
+
+- **In scope**: harness adapters (Claude Code channel plugin, opencode plugin), shared event schema, ingest mechanisms (HTTP, substrate hook consumer), wake / silent-inject modes.
+- **Out of scope (for now)**: pipeline orchestration (sf2's job), durable event storage (substrate's job), action audit (agent-provenance's job). agent-wake composes with these, doesn't replicate them.
+
+## Real-world examples
+
+- [GitHub Actions webhook → agent-wake](examples/github-actions-webhook.md) — trigger your agent when CI fails.
 
 ## Related projects
 
-- `/projects/substrate` — natural durable-ingest path. Hook queue already
-  exists; agent-wake hook target translates events to harness wakes.
-- `/projects/agent-provenance` — consumer. Channel permission-relay
-  primitive is useful for approval chains; wake events themselves are
-  audit-worthy.
-- `/projects/software-factory-2` — consumer. External events re-entering
-  a pipeline run.
-- `/projects/wake-probe` — testing instrument. The single-file Python MCP
-  server used to validate wake mechanisms during research.
+- `/projects/substrate` — natural durable-ingest path. Hook queue already exists; agent-wake hook target translates events to harness wakes.
+- `/projects/agent-provenance` — consumer. Channel permission-relay primitive is useful for approval chains; wake events themselves are audit-worthy.
+- `/projects/software-factory-2` — consumer. External events re-entering a pipeline run.
+- `/projects/wake-probe` — testing instrument. The single-file Python MCP server used to validate wake mechanisms during research (deprecated; see `adapters/claude/` for the production plugin).
 
-## Status
+## CI
 
-- 2026-05-23: project created. Research findings in [AGENTS.md](AGENTS.md).
-  No code yet.
+Both adapters are tested on every push / PR via GitHub Actions (`.github/workflows/ci.yml`):
+- **Python**: `pytest` + `fakechat-test.py` end-to-end
+- **TypeScript**: `bun test` + `tsc --noEmit`
 
 ## License
 
-MIT (planned, matching agent-provenance posture).
+MIT.

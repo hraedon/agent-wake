@@ -20,6 +20,8 @@ export function postReply(config: Config, source: string, content: string, inRep
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  promise.catch(() => {});
+  promise.catch((e) => {
+    console.error("[agent-wake-opencode] Reply delivery failed:", e);
+  });
   return "sent";
 }

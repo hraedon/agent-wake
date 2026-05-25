@@ -28,6 +28,18 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> None:
+    import socket
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.05)
+    raise RuntimeError(f"Port {host}:{port} not ready after {timeout}s")
+
+
 def main():
     secret = os.urandom(32).hex()
     port = _find_free_port()
@@ -47,10 +59,11 @@ def main():
         env = os.environ.copy()
         env["AGENT_WAKE_CONFIG"] = config_path
         env["DEMO_SECRET"] = secret
-        venv_site = os.path.join(PROJECT_ROOT, ".venv", "lib", "python3.12", "site-packages")
+        venv_py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        venv_site = os.path.join(PROJECT_ROOT, ".venv", "lib", venv_py_ver, "site-packages")
         env["PYTHONPATH"] = os.path.join(PROJECT_ROOT, "adapters", "claude", "src")
         if os.path.isdir(venv_site):
-            env["PYTHONPATH"] += os.pathsep + venv_site
+            env["PYTHONPATH"] = env["PYTHONPATH"] + os.pathsep + venv_site
 
         adapter_root = os.path.join(PROJECT_ROOT, "adapters", "claude")
         proc = subprocess.Popen(
@@ -87,8 +100,8 @@ def main():
             )
             proc.stdin.flush()
 
-            # Give HTTP listener time to start
-            time.sleep(0.5)
+            # Wait for HTTP listener to become ready (retry with backoff)
+            _wait_for_port("127.0.0.1", port, timeout=5)
 
             # === POST wake event ===
             body = json.dumps({
