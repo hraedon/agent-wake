@@ -35,3 +35,4 @@ dist/
 # Local environment overrides
 .env
 .env.*
+!.env.example

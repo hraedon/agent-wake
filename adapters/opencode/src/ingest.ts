@@ -43,8 +43,6 @@ export function buildWakeEvent(
   ) {
     const claimedSource = payload.source;
     if (claimedSource !== undefined && claimedSource !== source) {
-      // Throw a sentinel error; the HTTP layer logs details internally
-      // and returns a generic body to avoid leaking source names.
       const err = new Error("source mismatch") as Error & {
         headerSource?: string;
         bodySource?: string;
@@ -54,6 +52,9 @@ export function buildWakeEvent(
       err.bodySource = String(claimedSource);
       err.sourceMismatch = true;
       throw err;
+    }
+    if (payload.source === undefined) {
+      payload.source = source;
     }
     return payload;
   }

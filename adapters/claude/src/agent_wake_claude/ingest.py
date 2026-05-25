@@ -63,6 +63,8 @@ def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict:
         claimed_source = payload.get("source")
         if claimed_source is not None and claimed_source != source:
             raise SourceMismatchError(source, str(claimed_source))
+        if "source" not in payload:
+            payload["source"] = source
         return payload
 
     # Wrap arbitrary JSON
@@ -111,7 +113,11 @@ class IngestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
             return
 
-        # Permission verdict path (special, no HMAC)
+        # Permission verdict path (special, no HMAC).
+        # SECURITY: This endpoint is unauthenticated. It relies on the
+        # HTTP listener being bound to 127.0.0.1 (localhost-only). Any
+        # local process can submit verdicts. Add HMAC gating in v1 if
+        # the listener is ever exposed beyond localhost.
         if self.path == "/permission/verdict":
             self._handle_permission_verdict()
             return

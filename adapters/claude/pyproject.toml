@@ -18,7 +18,6 @@ agent-wake-claude = "agent_wake_claude.__main__:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]

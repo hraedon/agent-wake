@@ -92,6 +92,8 @@ def main() -> None:
             msg = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(msg, dict):
+            continue
         try:
             handle(msg)
         except Exception:
