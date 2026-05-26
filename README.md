@@ -22,65 +22,100 @@ wake primitive.
 
 | Component | Status | Language |
 |---|---|---|
+| [`daemon/`](daemon/) | `agent-waked` — shared ingest daemon | Python 3.11+ |
 | [`core/`](core/) | Shared wire format (docs + examples) | — |
 | [`adapters/claude/`](adapters/claude/) | Claude Code channel plugin (MCP stdio) | Python 3.11+ |
-| [`adapters/opencode/`](adapters/opencode/) | opencode plugin (in-process) | TypeScript / Bun |
+| [`adapters/opencode.archived/`](adapters/opencode.archived/) | **archived** — pending daemon-based rewrite | TypeScript / Bun |
 | [`tools/`](tools/) | `generate-secret.py`, `fakechat-test.py` | Python 3 |
 | [`examples/`](examples/) | Real-world integration guides | — |
 
 ## Quick start
 
-1. Generate a shared HMAC secret:
-   ```bash
-   python tools/generate-secret.py
-   ```
-   Export it: `export AGENT_WAKE_DEMO_SECRET=<output>`
+### 1. Install and start the daemon
 
-2. Write a config at `~/.config/agent-wake/config.json` (see [`core/schema.md`](core/schema.md) §Configuration or [`core/examples/config.json`](core/examples/config.json)).
+```bash
+pip install --user -e daemon/
+```
 
-3. Install and run the adapter for your harness:
+Generate a shared HMAC secret and write a config:
 
-   **Claude Code:**
-   ```bash
-   cd adapters/claude && pip install -e .
-   claude --dangerously-load-development-channels server:agent-wake-claude
-   ```
+```bash
+python3 tools/generate-secret.py
+# export the output as AGENT_WAKE_DEMO_SECRET
+```
 
-   **opencode:**
-   ```bash
-   cd adapters/opencode && bun install && bun run build
-   # Then add the plugin path to ~/.config/opencode/opencode.json:
-   #   "plugin": ["/path/to/agent-wake/adapters/opencode/dist/index.js"]
-   ```
+Create `~/.config/agent-wake/config.json`:
 
-   See adapter-specific docs: [`adapters/claude/README.md`](adapters/claude/README.md) · [`adapters/opencode/README.md`](adapters/opencode/README.md)
+```json
+{
+  "version": 1,
+  "listen": {"host": "127.0.0.1", "port": 8788},
+  "sources": {
+    "demo": {
+      "secret_env": "AGENT_WAKE_DEMO_SECRET"
+    }
+  },
+  "routing": {}
+}
+```
 
-4. Send a test event:
-   ```bash
-   bash adapters/claude/examples/demo.sh
-   ```
+Start the daemon (foreground for testing, or install as a systemd user service — see [`daemon/README.md`](daemon/README.md)):
 
-## Architecture sketch
+```bash
+agent-waked
+```
+
+### 2. Install the adapter for your harness
+
+**Claude Code:**
+```bash
+cd adapters/claude && pip install -e .
+claude --dangerously-load-development-channels server:agent-wake-claude
+```
+
+**opencode:** archived pending the daemon-based rewrite.
+
+See adapter-specific docs: [`adapters/claude/README.md`](adapters/claude/README.md)
+
+### 3. Send a test event
+
+```bash
+bash adapters/claude/examples/demo.sh
+```
+
+The adapter receives the wake event via the daemon's unix socket and delivers it to your running agent session.
+
+## Architecture
 
 ```
 External system
-      ↓ (event)
-[ingest: HTTP listener | substrate hook | scheduled trigger]
-      ↓
-[router: which session(s)?]
-      ↓
-[harness adapter]
-      ↓ (native wake primitive)
-Running agent session
+      │  POST / (HTTPS, HMAC-signed body, v0 wake event)
+      ▼
+┌───────────────────────────────────────────────────────────┐
+│ agent-waked                                               │
+│                                                           │
+│  HTTP ingest ──► gating ──► dedupe ──► router             │
+│                                            │              │
+│                                            ▼              │
+│                                  unix-socket pub          │
+│                                            │              │
+│  HTTPS reply ◄── outbox ◄── reply rx ◄─── (frames)       │
+└───────────────────────────────────────────────────────────┘
+                        │ (unix socket)
+                        ▼
+┌───────────────────────────────────────────────────────────┐
+│ adapter (e.g. agent-wake-claude)                          │
+│  daemon client ──► harness wake primitive                 │
+└───────────────────────────────────────────────────────────┘
 ```
 
 **Per-harness adapter:**
-- Claude Code: channel plugin emitting `notifications/claude/channel` with `{ content, meta }`. Requires `--dangerously-load-development-channels server:agent-wake-claude` during the research preview.
-- opencode: plugin calling `client.session.prompt({ noReply: false, parts })`. In-process, no allowlist friction.
+- Claude Code: channel plugin emitting `notifications/claude/channel` with `{ content, meta }`. Requires `--dangerously-load-development-channels server:agent-wake-claude` during the research preview. Connects to the daemon via unix socket.
+- opencode: archived; will return as a daemon client. See `adapters/opencode.archived/` for the prior implementation.
 
 ## Scope
 
-- **In scope**: harness adapters (Claude Code channel plugin, opencode plugin), shared event schema, ingest mechanisms (HTTP, substrate hook consumer), wake / silent-inject modes.
+- **In scope**: daemon (shared ingest port, routing, reply delivery), harness adapters, shared event schema, ingest mechanisms (HTTP, substrate hook consumer), wake / silent-inject modes.
 - **Out of scope (for now)**: pipeline orchestration (sf2's job), durable event storage (substrate's job), action audit (agent-provenance's job). agent-wake composes with these, doesn't replicate them.
 
 ## Real-world examples
@@ -107,9 +142,9 @@ Running agent session
 
 ## CI
 
-Both adapters are tested on every push / PR via GitHub Actions (`.github/workflows/ci.yml`):
-- **Python**: `pytest` + `fakechat-test.py` end-to-end
-- **TypeScript**: `bun test` + `tsc --noEmit`
+The daemon and Claude adapter are tested on every push / PR via GitHub Actions (`.github/workflows/ci.yml`):
+- **Python (daemon)**: `cd daemon && pytest -q`
+- **Python (claude adapter)**: `cd adapters/claude && pytest -q`
 
 ## License
 
