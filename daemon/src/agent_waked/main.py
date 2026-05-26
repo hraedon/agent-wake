@@ -16,6 +16,7 @@ from aiohttp import web
 
 from .config import ConfigError, load_config
 from .ingest import create_ingest_app
+from .router import Router
 from .socket_server import SocketServer
 
 log = logging.getLogger("agent_waked")
@@ -52,14 +53,16 @@ async def _run() -> int:
     port = listen.get("port", 8788)
     sock_path = _resolve_socket_path(cfg)
 
-    app = create_ingest_app()
+    router = Router(cfg)
+
+    app = create_ingest_app(cfg, router)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
     log.info("HTTP ingest listening on %s:%s", host, port)
 
-    socket_server = SocketServer(sock_path)
+    socket_server = SocketServer(sock_path, router)
     await socket_server.start()
 
     stop_event = asyncio.Event()

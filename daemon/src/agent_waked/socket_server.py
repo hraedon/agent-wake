@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ulid import ULID
 
@@ -21,6 +22,9 @@ from .proto import (
     encode_frame,
     validate_frame,
 )
+
+if TYPE_CHECKING:
+    from .router import Router
 
 log = logging.getLogger("agent_waked.socket_server")
 
@@ -73,9 +77,10 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict:
 
 
 class SocketServer:
-    def __init__(self, socket_path: Path):
+    def __init__(self, socket_path: Path, router: "Router"):
         self._socket_path = socket_path
         self._lock_path = Path(str(socket_path) + ".lock")
+        self._router = router
         self._server: asyncio.Server | None = None
         self._lock_fd: int | None = None
         self._connections: dict[str, ClientConnection] = {}
@@ -139,6 +144,7 @@ class SocketServer:
         except Exception as exc:
             log.warning("connection error session_id=%s: %s", session_id, exc)
         finally:
+            self._router.unsubscribe(session_id)
             self._connections.pop(session_id, None)
             conn.close()
             log.info("connection closed, session_id=%s", session_id)
@@ -170,29 +176,36 @@ class SocketServer:
             raise ConnectionError("connection limit reached")
 
         sources = frame.get("filters", {}).get("sources", [])
+        adapter = frame["adapter"]
+        instance = frame["instance"]
+
         conn = ClientConnection(
             session_id=session_id,
-            adapter=frame["adapter"],
-            instance=frame["instance"],
+            adapter=adapter,
+            instance=instance,
             sources=sources,
             reader=reader,
             writer=writer,
         )
         self._connections[session_id] = conn
 
+        accepted = self._router.accepted_sources_for(adapter, sources)
+
+        self._router.subscribe(session_id, adapter, instance, sources, conn)
+
         ack = {
             "type": "hello_ack",
             "v": 1,
             "session_id": session_id,
-            "accepted_sources": sources,
+            "accepted_sources": accepted,
         }
         await conn.send_frame(ack)
         log.info(
-            "adapter subscribed session_id=%s adapter=%s instance=%s sources=%s",
+            "adapter subscribed session_id=%s adapter=%s instance=%s accepted_sources=%s",
             session_id,
-            conn.adapter,
-            conn.instance,
-            conn.sources,
+            adapter,
+            instance,
+            accepted,
         )
 
     async def _frame_loop(self, conn: ClientConnection) -> None:

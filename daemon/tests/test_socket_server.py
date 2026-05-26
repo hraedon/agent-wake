@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 
 from agent_waked.proto import MAX_FRAME_SIZE, encode_frame
+from agent_waked.router import Router
 from agent_waked.socket_server import SocketServer
+
+
+def _router_config():
+    return {
+        "sources": {"github-actions": {"secret": b"k1"}},
+        "routing": {},
+    }
 
 
 def _hello_frame(**overrides) -> dict:
@@ -31,7 +39,8 @@ def sock_dir(tmp_path):
 
 @pytest.fixture
 async def server(sock_dir):
-    srv = SocketServer(sock_dir)
+    router = Router(_router_config())
+    srv = SocketServer(sock_dir, router)
     await srv.start()
     yield srv
     srv.close()
@@ -163,7 +172,8 @@ async def test_non_hello_first_frame_gets_unauthenticated(server, sock_dir):
 @pytest.mark.asyncio
 async def test_connection_cap_enforced(sock_dir):
     from agent_waked.socket_server import MAX_CONNECTIONS
-    srv = SocketServer(sock_dir)
+    router = Router(_router_config())
+    srv = SocketServer(sock_dir, router)
     await srv.start()
     connections = []
     try:
@@ -188,10 +198,12 @@ async def test_connection_cap_enforced(sock_dir):
 
 @pytest.mark.asyncio
 async def test_second_instance_rejected(sock_dir):
-    srv1 = SocketServer(sock_dir)
+    router = Router(_router_config())
+    srv1 = SocketServer(sock_dir, router)
     await srv1.start()
     try:
-        srv2 = SocketServer(sock_dir)
+        router2 = Router(_router_config())
+        srv2 = SocketServer(sock_dir, router2)
         with pytest.raises(RuntimeError, match="another agent-waked instance"):
             await srv2.start()
     finally:
