@@ -24,6 +24,7 @@ from .proto import (
 )
 
 if TYPE_CHECKING:
+    from .outbox import Outbox
     from .router import Router
 
 log = logging.getLogger("agent_waked.socket_server")
@@ -77,10 +78,16 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict:
 
 
 class SocketServer:
-    def __init__(self, socket_path: Path, router: "Router"):
+    def __init__(
+        self,
+        socket_path: Path,
+        router: "Router",
+        outbox: "Outbox | None" = None,
+    ):
         self._socket_path = socket_path
         self._lock_path = Path(str(socket_path) + ".lock")
         self._router = router
+        self._outbox = outbox
         self._server: asyncio.Server | None = None
         self._lock_fd: int | None = None
         self._connections: dict[str, ClientConnection] = {}
@@ -234,12 +241,14 @@ class SocketServer:
                 )
                 raise ConnectionError(f"invalid frame: {err}")
 
-            if ftype in ("ack", "nack", "reply"):
+            if ftype == "reply":
+                await self._handle_reply(conn, frame)
+            elif ftype in ("ack", "nack"):
                 log.info(
-                    "received %s from session_id=%s ack_id/reply_id=%s",
+                    "received %s from session_id=%s ack_id=%s",
                     ftype,
                     conn.session_id,
-                    frame.get("ack_id") or frame.get("reply_id"),
+                    frame.get("ack_id"),
                 )
             else:
                 log.warning(
@@ -247,6 +256,22 @@ class SocketServer:
                     ftype,
                     conn.session_id,
                 )
+
+    async def _handle_reply(
+        self, conn: ClientConnection, frame: dict
+    ) -> None:
+        if self._outbox is None:
+            log.error("reply received but no outbox configured")
+            return
+        result = await self._outbox.deliver(
+            source=frame["source"],
+            reply_id=frame["reply_id"],
+            in_reply_to=frame["in_reply_to"],
+            content=frame["content"],
+        )
+        result_frame = {"type": "reply_result"}
+        result_frame.update(result)
+        await conn.send_frame(result_frame)
 
     async def _send_error(
         self,

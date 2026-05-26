@@ -16,6 +16,7 @@ from aiohttp import web
 
 from .config import ConfigError, load_config
 from .ingest import create_ingest_app
+from .outbox import Outbox
 from .router import Router
 from .socket_server import SocketServer
 
@@ -55,6 +56,9 @@ async def _run() -> int:
 
     router = Router(cfg)
 
+    outbox = Outbox(cfg)
+    await outbox.start()
+
     app = create_ingest_app(cfg, router)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -62,7 +66,7 @@ async def _run() -> int:
     await site.start()
     log.info("HTTP ingest listening on %s:%s", host, port)
 
-    socket_server = SocketServer(sock_path, router)
+    socket_server = SocketServer(sock_path, router, outbox=outbox)
     await socket_server.start()
 
     stop_event = asyncio.Event()
@@ -74,6 +78,7 @@ async def _run() -> int:
 
     log.info("shutting down")
     socket_server.close()
+    await outbox.close()
     await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
     return 0
 
