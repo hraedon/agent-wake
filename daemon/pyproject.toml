@@ -1,0 +1,32 @@
+[project]
+name = "agent-waked"
+version = "0.1.0"
+description = "agent-wake daemon — central demultiplexer for wake events"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+  {name = "agent-wake contributors"}
+]
+dependencies = [
+    "aiohttp>=3.11,<3.12",
+    "python-ulid~=3.0",
+]
+
+[project.scripts]
+agent-waked = "agent_waked.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

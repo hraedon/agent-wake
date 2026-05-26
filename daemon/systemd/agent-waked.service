@@ -1,0 +1,13 @@
+[Unit]
+Description=agent-wake daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-waked
+Restart=on-failure
+RestartSec=2s
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
