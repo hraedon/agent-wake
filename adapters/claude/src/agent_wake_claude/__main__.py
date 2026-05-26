@@ -1,54 +1,55 @@
 """Entry point for agent-wake Claude adapter.
 
-Loads config, starts the HTTP ingest listener in a background thread, then runs
-the MCP stdio server in the foreground thread. Handles SIGTERM/SIGINT for
-graceful shutdown of the HTTP listener.
+Spec reference: v1-daemon-spec.md §9.5.
+
+Runs the daemon client (asyncio) in the main thread and the MCP
+stdio server in a background thread.  Exits when stdin closes
+(Claude Code shut down) or on SIGTERM / SIGINT.
 """
 
+import asyncio
 import logging
 import signal
 import sys
+import threading
 
+from .client import run_client
 from .config import ConfigError, load_config
-from .ingest import start_listener
 from .server import main as server_main
-from .channel import emit_wake_event
 
 logger = logging.getLogger("agent_wake_claude")
 
-_ingest_server = None
-
-
-def _shutdown(signum, frame):
-    logger.info("received signal %s, shutting down", signum)
-    if _ingest_server is not None:
-        _ingest_server.shutdown()
-    sys.exit(0)
-
 
 def main() -> None:
-    global _ingest_server
-
     try:
         config = load_config()
     except ConfigError as e:
         logger.error("config error: %s", e)
         sys.exit(1)
 
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-    _ingest_server = start_listener(config, emit_wake_event, return_server=True)
+    client_task = loop.create_task(run_client(config))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, client_task.cancel)
+
+    mcp_thread = threading.Thread(target=server_main, daemon=True)
+    mcp_thread.start()
 
     try:
-        server_main()
-    except KeyboardInterrupt:
+        loop.run_until_complete(client_task)
+    except asyncio.CancelledError:
         pass
     finally:
-        if _ingest_server is not None:
-            _ingest_server.shutdown()
+        loop.close()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     main()

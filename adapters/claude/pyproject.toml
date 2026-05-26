@@ -8,9 +8,7 @@ license = {text = "MIT"}
 authors = [
   {name = "agent-wake contributors"}
 ]
-dependencies = [
-    "ulid-py>=1.1",
-]
+dependencies = []
 
 [project.scripts]
 agent-wake-claude = "agent_wake_claude.__main__:main"
@@ -18,11 +16,13 @@ agent-wake-claude = "agent_wake_claude.__main__:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_mode = "auto"
 
 [build-system]
 requires = ["hatchling"]

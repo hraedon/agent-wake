@@ -44,10 +44,6 @@ def test_tools_list():
 
 
 def test_unhandled_exception_in_handler_returns_jsonrpc_internal_error():
-    """If a tool handler raises an unexpected exception for a request that
-    has an `id`, the server must send back a `-32603` JSON-RPC error rather
-    than hang or crash. Regression test for the MCP catch-all path.
-    """
     import agent_wake_claude.server as srv
 
     captured = []
@@ -55,7 +51,6 @@ def test_unhandled_exception_in_handler_returns_jsonrpc_internal_error():
     def fake_send(msg):
         captured.append(msg)
 
-    # Force handle_reply_tool_call to raise an unexpected error type.
     def boom(_args):
         raise RuntimeError("simulated unhandled failure")
 
@@ -82,14 +77,56 @@ def test_unhandled_exception_in_handler_returns_jsonrpc_internal_error():
 
 
 def test_reply_tool_no_callback(monkeypatch):
-    import agent_wake_claude.config as cm
-    orig_cached = cm._cached_config
-    cm._cached_config = {
-        "sources": {"demo": {"callback_url": None}},
-        "default_callback_url": None,
-    }
-    try:
-        result = handle_reply_tool_call({"source": "demo", "content": "hello"})
-        assert "sent (no callback_url configured)" in str(result)
-    finally:
-        cm._cached_config = orig_cached
+    import agent_wake_claude.client as client_mod
+
+    monkeypatch.setattr(client_mod, "send_reply_frame", lambda frame: None)
+
+    def fake_wait(reply_id, timeout=35.0):
+        return {"status": "no_callback", "reply_id": reply_id}
+
+    monkeypatch.setattr(client_mod.ReplyResultBus, "wait_result", fake_wait)
+
+    result = handle_reply_tool_call({"source": "demo", "content": "hello"})
+    assert "sent (no callback_url configured)" in str(result)
+
+
+def test_reply_tool_delivered(monkeypatch):
+    import agent_wake_claude.client as client_mod
+
+    monkeypatch.setattr(client_mod, "send_reply_frame", lambda frame: None)
+
+    def fake_wait(reply_id, timeout=35.0):
+        return {"status": "delivered", "reply_id": reply_id}
+
+    monkeypatch.setattr(client_mod.ReplyResultBus, "wait_result", fake_wait)
+
+    result = handle_reply_tool_call({"source": "demo", "content": "hello"})
+    assert result["content"][0]["text"] == "sent"
+
+
+def test_reply_tool_failed(monkeypatch):
+    import agent_wake_claude.client as client_mod
+
+    monkeypatch.setattr(client_mod, "send_reply_frame", lambda frame: None)
+
+    def fake_wait(reply_id, timeout=35.0):
+        return {"status": "failed", "reply_id": reply_id, "error": "HTTP 500"}
+
+    monkeypatch.setattr(client_mod.ReplyResultBus, "wait_result", fake_wait)
+
+    result = handle_reply_tool_call({"source": "demo", "content": "hello"})
+    assert "reply delivery failed: HTTP 500" in str(result)
+    assert result.get("isError") is True
+
+
+def test_reply_tool_not_connected(monkeypatch):
+    import agent_wake_claude.client as client_mod
+
+    def boom(frame):
+        raise RuntimeError("not connected to daemon")
+
+    monkeypatch.setattr(client_mod, "send_reply_frame", boom)
+
+    result = handle_reply_tool_call({"source": "demo", "content": "hello"})
+    assert "reply delivery failed" in str(result)
+    assert result.get("isError") is True

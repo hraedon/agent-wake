@@ -1,9 +1,14 @@
-"""Reply tool for agent-wake Claude adapter."""
+"""Reply tool for agent-wake Claude adapter.
 
-import json
-import urllib.request
+Spec reference: v1-daemon-spec.md §9.4.
 
-from .config import load_config
+No longer makes HTTPS calls directly.  Sends a reply frame to the
+daemon and awaits the matching reply_result via ReplyResultBus.
+"""
+
+import uuid
+
+from . import client as daemon_client
 
 
 def get_tool_definition() -> dict:
@@ -29,43 +34,50 @@ def handle_reply_tool_call(arguments: dict) -> dict:
 
     if not source or not content:
         return {
-            "content": [{"type": "text", "text": "missing required fields: source, content"}],
+            "content": [
+                {"type": "text", "text": "missing required fields: source, content"}
+            ],
         }
 
-    config = load_config()
-    source_cfg = config.get("sources", {}).get(source)
-    callback_url = source_cfg.get("callback_url") if source_cfg else None
-    callback_url = callback_url or config.get("default_callback_url")
-
-    if not callback_url:
-        return {
-            "content": [{"type": "text", "text": "sent (no callback_url configured)"}],
-        }
-
-    payload = {
-        "v": 0,
+    reply_id = str(uuid.uuid4())
+    frame = {
+        "type": "reply",
+        "reply_id": reply_id,
+        "source": source,
         "in_reply_to": in_reply_to or "",
         "content": content,
-        "meta": {},
     }
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        callback_url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            _ = resp.read()
+        daemon_client.send_reply_frame(frame)
     except Exception as e:
         return {
-            "content": [{"type": "text", "text": f"reply delivery failed: {e}"}],
+            "content": [
+                {"type": "text", "text": f"reply delivery failed: {e}"}
+            ],
             "isError": True,
         }
 
+    result = daemon_client.ReplyResultBus.wait_result(reply_id, timeout=35.0)
+    if result is None:
+        return {
+            "content": [
+                {"type": "text", "text": "reply delivery failed: timed out"}
+            ],
+            "isError": True,
+        }
+
+    status = result.get("status")
+    if status == "delivered":
+        return {"content": [{"type": "text", "text": "sent"}]}
+    if status == "no_callback":
+        return {
+            "content": [
+                {"type": "text", "text": "sent (no callback_url configured)"}
+            ],
+        }
+    error = result.get("error", "unknown error")
     return {
-        "content": [{"type": "text", "text": "sent"}],
+        "content": [{"type": "text", "text": f"reply delivery failed: {error}"}],
+        "isError": True,
     }

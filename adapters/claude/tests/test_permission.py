@@ -18,7 +18,7 @@ def _clear_pending():
 
 def _set_mock_config():
     cm._cached_config = {
-        "sources": {"demo": {"secret": b"shhh", "callback_url": None}},
+        "sources": {"demo": {}},
         "default_callback_url": None,
     }
 

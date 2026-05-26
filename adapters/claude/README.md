@@ -2,6 +2,15 @@
 
 Claude Code channel plugin for agent-wake external event signaling.
 
+This adapter connects to the **agent-waked daemon** over a unix socket
+and receives wake events.  It does **not** bind any TCP port — the
+daemon owns the HTTP ingest endpoint (`localhost:8788`).
+
+## Prerequisites
+
+The agent-waked daemon must be running.  See the top-level README for
+daemon installation and configuration.
+
 ## Install
 
 From the repo root:
@@ -21,30 +30,27 @@ pip install -e ".[dev]"
 
 ## Configure
 
-1. Generate a shared HMAC secret:
-   ```bash
-   python ../../tools/generate-secret.py
-   ```
-   Export it as an environment variable (e.g., `export AGENT_WAKE_DEMO_SECRET=<output>`).
+The adapter reads the same config file as the daemon:
+`~/.config/agent-wake/config.json` (or `AGENT_WAKE_CONFIG`).
 
-2. Create `~/.config/agent-wake/config.json` (or set `AGENT_WAKE_CONFIG` to a custom path):
+```json
+{
+  "version": 1,
+  "listen": {"host": "127.0.0.1", "port": 8788},
+  "socket_path": null,
+  "sources": {
+    "demo": {
+      "secret_env": "AGENT_WAKE_DEMO_SECRET",
+      "callback_url": null
+    }
+  },
+  "default_callback_url": null
+}
+```
 
-   ```json
-   {
-     "version": 0,
-     "listen": {"host": "127.0.0.1", "port": 8788},
-     "sources": {
-       "demo": {
-         "secret_env": "AGENT_WAKE_DEMO_SECRET",
-         "callback_url": null
-       }
-     },
-     "default_callback_url": null
-   }
-   ```
-
-   See [`core/schema.md`](../../core/schema.md) for the full config spec and
-   [`core/examples/config.json`](../../core/examples/config.json) for a ready-to-copy example.
+The adapter only uses `sources` (source names for the hello handshake)
+and `socket_path` (daemon socket path).  HMAC secrets, callback URLs,
+and listen host/port are daemon-side concerns.
 
 ## Run as a Claude Code channel
 
@@ -52,10 +58,17 @@ pip install -e ".[dev]"
 claude --dangerously-load-development-channels server:agent-wake-claude
 ```
 
-Claude Code spawns `agent-wake-claude` as a subprocess and communicates via
-JSON-RPC over stdio (the MCP channels research-preview protocol).
+Claude Code spawns `agent-wake-claude` as a subprocess.  The adapter
+connects to the daemon over the unix socket and relays wake events as
+MCP channel notifications.
+
+If the daemon is not running when the adapter starts, it logs a
+reconnect warning and retries with exponential backoff (1 s → 30 s cap).
+It does not crash.
 
 ## Send a test wake event
+
+With the daemon running:
 
 ```bash
 BODY='{"v":0,"event_id":"01HZXPDEMO0000000000000001","source":"demo","kind":"alert","content":"hello","wake":true,"meta":{}}'
@@ -67,12 +80,6 @@ curl -s -X POST http://127.0.0.1:8788/ \
   -d "$BODY"
 ```
 
-Or run the demo script:
-
-```bash
-bash examples/demo.sh
-```
-
 ## Reply tool
 
 The adapter exposes a single MCP tool: `agent_wake_reply`.
@@ -82,72 +89,17 @@ Arguments:
 - `content` (required): text body of the reply.
 - `in_reply_to` (optional): the `event_id` being replied to.
 
-If no `callback_url` is configured for the source, the tool returns a graceful
-green-path message noting that the reply was not delivered externally.
+The reply is forwarded to the daemon, which POSTs it to the configured
+callback URL.  If no callback is configured, the tool returns a graceful
+green-path message.
 
 ## Permission relay
 
 The adapter forwards Claude Code `notifications/claude/channel/permission_request`
-to the `default_callback_url`. Verdicts are POSTed back by the external system to
-`/permission/verdict` on the adapter's HTTP listener:
-
-```json
-{"request_id": "abcde", "behavior": "allow"}
-```
+to the `default_callback_url`.
 
 ## Test
 
 ```bash
 pytest tests/ -v
-python ../../tools/fakechat-test.py
 ```
-
-## Secret management
-
-The adapter uses per-source HMAC-SHA256 shared secrets. Secrets live in
-environment variables (referenced from `config.json` via `secret_env`) and
-must never be written to `config.json` itself.
-
-**Generate a secret:**
-
-```bash
-python ../../tools/generate-secret.py
-```
-
-This prints a 64-character hex string from `secrets.token_hex(32)`. Set it
-as the environment variable named in your config's `secret_env` field. A
-template is provided at `.env.example` — copy it to `.env` and fill in
-values. Both `.env` files are gitignored.
-
-**Rotation (v0):**
-
-v0 has no zero-downtime rotation. To rotate a secret:
-
-1. Stop the adapter (and Claude Code if it's running).
-2. Generate a new secret with `generate-secret.py`.
-3. Update the env var in `.env` (and re-export it in the running shell).
-4. Restart Claude Code with the adapter.
-5. Update all senders (GitHub Actions, webhooks, etc.) to use the new
-   secret. Senders signing with the old secret will be rejected with 403.
-
-Any in-flight events signed with the old secret are dropped; senders
-should retry per the schema's retry guidance.
-
-**File permissions:**
-
-If you store secrets in an env file rather than your shell rc, set its
-permissions to `0600`:
-
-```bash
-chmod 600 .env
-```
-
-The adapter does not enforce this — it reads from `os.environ`. The
-0600 advisory applies to the file you source the env from.
-
-## Known v0 limitations
-
-- Silent inject (`wake: false`) is silently dropped because Claude Code channels
-  always trigger a turn.
-- In-memory deduplication only; restarts clear the window.
-- Replies are best-effort and lost if the session exits before the tool fires.
