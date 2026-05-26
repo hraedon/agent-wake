@@ -101,11 +101,16 @@ External system
 │                                            │              │
 │  HTTPS reply ◄── outbox ◄── reply rx ◄─── (frames)       │
 └───────────────────────────────────────────────────────────┘
-                        │ (unix socket)
+                        │ (unix socket: $XDG_RUNTIME_DIR/agent-wake.sock)
                         ▼
 ┌───────────────────────────────────────────────────────────┐
 │ adapter (e.g. agent-wake-claude)                          │
-│  daemon client ──► harness wake primitive                 │
+│                                                           │
+│  daemon client (long-lived unix conn)                     │
+│      │                                                    │
+│      ├──► hello on connect                                │
+│      ├──◄ wake frames ──► harness wake primitive          │
+│      └──► reply frames (from agent_wake_reply tool)       │
 └───────────────────────────────────────────────────────────┘
 ```
 

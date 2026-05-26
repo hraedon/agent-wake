@@ -8,8 +8,10 @@ and can respond.
 
 ## Prerequisites
 
-1. agent-wake is running on a machine reachable from GitHub Actions (or via a
-tunnel like ngrok for local testing).
+1. The `agent-waked` daemon is running on a machine reachable from GitHub
+   Actions (or via a tunnel like ngrok for local testing).  The daemon owns the
+   HTTP ingest port (default `127.0.0.1:8788`).  See the
+   [main README](../README.md#quick-start) for installation.
 2. You have a shared HMAC secret generated:
    ```bash
    python tools/generate-secret.py
@@ -17,17 +19,19 @@ tunnel like ngrok for local testing).
 3. Your `~/.config/agent-wake/config.json` includes a `github-actions` source:
    ```json
    {
-     "version": 0,
+     "version": 1,
+     "listen": {"host": "127.0.0.1", "port": 8788},
      "sources": {
        "github-actions": {
          "secret_env": "AGENT_WAKE_GITHUB_SECRET",
          "callback_url": null
        }
-     }
+     },
+     "routing": {}
    }
    ```
-4. The `AGENT_WAKE_GITHUB_SECRET` environment variable is set wherever agent-wake
-   runs.
+4. The `AGENT_WAKE_GITHUB_SECRET` environment variable is set wherever the
+   daemon runs.
 
 ---
 
@@ -133,4 +137,3 @@ Usage in a workflow:
 
 - [`core/schema.md`](../../core/schema.md) — wire format
 - [`adapters/claude/README.md`](../../adapters/claude/README.md) — Claude adapter setup
-- [`adapters/opencode/README.md`](../../adapters/opencode/README.md) — opencode adapter setup

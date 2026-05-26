@@ -89,8 +89,9 @@ a v1+ design question deferred to substrate.
 
 ## HTTP ingest
 
-The adapter exposes a local HTTP listener (default `127.0.0.1:8788`).
-External systems POST wake events to it:
+The `agent-waked` daemon owns the HTTP ingest endpoint (default
+`127.0.0.1:8788`).  External systems POST wake events to it.  (In v0,
+each adapter ran its own listener; v1 consolidated this into the daemon.)
 
 ```
 POST / HTTP/1.1
@@ -147,11 +148,12 @@ do.
 ## Configuration file
 
 Located at `~/.config/agent-wake/config.json` (override via
-`AGENT_WAKE_CONFIG` env var).
+`AGENT_WAKE_CONFIG` env var).  The daemon reads this file at startup and
+on `SIGHUP`.  Adapters no longer read it directly.
 
 ```json
 {
-  "version": 0,
+  "version": 1,
   "listen": {
     "host": "127.0.0.1",
     "port": 8788
@@ -171,10 +173,13 @@ Located at `~/.config/agent-wake/config.json` (override via
 ```
 
 - Each source has its own HMAC secret (read from an env var; never written to the
-config file).
+  config file).
 - `callback_url` is optional. If present, replies POST there. If absent, replies
-fail gracefully (log a warning, return "sent" to the harness — replies are
-best-effort in v0).
+  fail gracefully (log a warning, return "sent" to the harness — replies are
+  best-effort in v0).
+- `version: 1` config adds `routing` and `socket_path` fields.  See
+  [`design/v1-daemon-spec.md`](../design/v1-daemon-spec.md) §5 for the full
+  schema.
 
 ---
 
