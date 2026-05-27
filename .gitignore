@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.mypy_cache/
 *.egg-info/
 dist/
 build/
@@ -16,8 +17,9 @@ node_modules/
 *.log
 
 # Lockfile policy: bun is the package manager for the opencode adapter.
-# bun.lockb is the source of truth. npm's package-lock.json is incidental.
+# bun.lock (text) is the source of truth. npm's package-lock.json is incidental.
 package-lock.json
+*.lockb
 
 # TypeScript
 dist/

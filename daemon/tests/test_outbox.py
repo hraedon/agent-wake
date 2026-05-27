@@ -160,7 +160,7 @@ async def test_reply_callback_500():
     try:
         url = str(cli.make_url("/callback"))
         cfg = _config(callback_url=url)
-        ob = Outbox(cfg)
+        ob = Outbox(cfg, max_retries=1)
         await ob.start()
         result = await ob.deliver(
             source="github-actions",
@@ -193,7 +193,7 @@ async def test_reply_callback_timeout():
     try:
         url = str(cli.make_url("/callback"))
         cfg = _config(callback_url=url)
-        ob = Outbox(cfg)
+        ob = Outbox(cfg, max_retries=1)
         await ob.start()
         result = await ob.deliver(
             source="github-actions",
@@ -228,7 +228,7 @@ async def test_reply_timeout_is_approximately_30s():
     try:
         url = str(cli.make_url("/callback"))
         cfg = _config(callback_url=url)
-        ob = Outbox(cfg)
+        ob = Outbox(cfg, max_retries=1)
         await ob.start()
         t0 = time.monotonic()
         result = await ob.deliver(

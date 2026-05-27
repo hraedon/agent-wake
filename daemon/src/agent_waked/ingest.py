@@ -8,6 +8,7 @@ gate + dedupe the handler calls ``Router.deliver(event)``.
 
 import json
 import logging
+from collections import deque
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -17,6 +18,7 @@ from .gating import verify_signature
 
 if TYPE_CHECKING:
     from .router import Router
+    from .socket_server import SocketServer
 
 log = logging.getLogger("agent_waked.ingest")
 
@@ -35,18 +37,21 @@ class SourceMismatchError(ValueError):
 
 
 class Dedupe:
-    """In-memory 256-id FIFO dedupe window."""
+    """In-memory 4096-id FIFO dedupe window."""
 
-    def __init__(self, max_size: int = 256):
-        self._ids: list[str] = []
+    def __init__(self, max_size: int = 4096):
+        self._seen: set[str] = set()
+        self._order: deque[str] = deque(maxlen=max_size)
         self._max = max_size
 
     def check(self, event_id: str) -> bool:
-        if event_id in self._ids:
+        if event_id in self._seen:
             return True
-        self._ids.append(event_id)
-        while len(self._ids) > self._max:
-            self._ids.pop(0)
+        if len(self._order) == self._max:
+            evicted = self._order[0]
+            self._seen.discard(evicted)
+        self._order.append(event_id)
+        self._seen.add(event_id)
         return False
 
 
@@ -65,6 +70,11 @@ def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict:
             raise SourceMismatchError(source, str(claimed_source))
         if "source" not in payload:
             payload["source"] = source
+        # Ensure minimum viable event structure
+        payload.setdefault("kind", "webhook")
+        payload.setdefault("content", "")
+        payload.setdefault("meta", {})
+        payload.setdefault("wake", True)
         return payload
 
     return {
@@ -86,7 +96,12 @@ def _json_response(status: int, payload: dict) -> web.Response:
     )
 
 
-def create_ingest_app(config: dict, router: "Router") -> web.Application:
+def create_ingest_app(
+    config: dict,
+    router: "Router",
+    socket_server: "SocketServer | None" = None,
+    version: str = "0.1.0",
+) -> web.Application:
     dedupe = Dedupe()
 
     async def post_root(request: web.Request) -> web.Response:
@@ -114,7 +129,7 @@ def create_ingest_app(config: dict, router: "Router") -> web.Application:
                 e.header_source,
                 e.body_source,
             )
-            return _json_response(500, {"error": "source mismatch"})
+            return _json_response(403, {"error": "unknown source or invalid signature"})
 
         event_id = event["event_id"]
 
@@ -132,7 +147,14 @@ def create_ingest_app(config: dict, router: "Router") -> web.Application:
     async def default_handler(request: web.Request) -> web.Response:
         return _json_response(404, {"error": "not found"})
 
+    async def health_handler(request: web.Request) -> web.Response:
+        body: dict = {"status": "ok", "version": version}
+        if socket_server is not None:
+            body["adapters"] = len(socket_server.connections)
+        return _json_response(200, body)
+
     app = web.Application()
+    app.router.add_get("/", health_handler)
     app.router.add_post("/", post_root)
     app.router.add_route("*", "/{path:.*}", default_handler)
     return app

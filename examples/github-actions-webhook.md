@@ -101,9 +101,9 @@ runs:
           --arg content "${{ inputs.content }}" \
           '{v: 0, event_id: $event_id, source: $source, kind: $kind, content: $content, wake: true, meta: {}}')
         SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${{ inputs.secret }}" | awk '{print $2}')
-        curl -s -X POST "${"{{ inputs.url }}"}/" \
+        curl -s -X POST "${{ inputs.url }}/" \
           -H "Content-Type: application/json" \
-          -H "X-AgentWake-Source: ${"{{ inputs.source }}"}" \
+          -H "X-AgentWake-Source: ${{ inputs.source }}" \
           -H "X-AgentWake-Signature: sha256=$SIG" \
           -d "$BODY"
       shell: bash

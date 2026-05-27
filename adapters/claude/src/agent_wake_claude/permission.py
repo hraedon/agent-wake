@@ -1,5 +1,7 @@
 """Permission relay for Claude Code channel permission requests."""
 
+import hashlib
+import hmac as hmac_mod
 import json
 import time
 import urllib.request
@@ -22,12 +24,21 @@ def _evict_expired() -> None:
         del _pending[k]
 
 
-def _forward_permission_request(payload: dict, callback_url: str) -> None:
+def _hmac_sign(secret: bytes, body: bytes) -> str:
+    """Return sha256=<hex> HMAC signature."""
+    digest = hmac_mod.new(secret, body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+def _forward_permission_request(payload: dict, callback_url: str, secret: bytes | None = None) -> None:
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        headers["X-AgentWake-Signature"] = _hmac_sign(secret, data)
     req = urllib.request.Request(
         callback_url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -35,7 +46,6 @@ def _forward_permission_request(payload: dict, callback_url: str) -> None:
             _ = resp.read()
     except Exception:
         # Best-effort: permission forwarding may fail silently.
-        # TODO: Add structured logging if/when substrate integration lands.
         pass
 
 
@@ -52,7 +62,14 @@ def handle_permission_request(params: dict) -> None:
     config = load_config()
     callback_url = config.get("default_callback_url")
     if callback_url:
-        _forward_permission_request(payload, callback_url)
+        # Sign with the first available source's secret
+        secret = None
+        for src_cfg in config.get("sources", {}).values():
+            s = src_cfg.get("secret")
+            if s:
+                secret = s
+                break
+        _forward_permission_request(payload, callback_url, secret)
 
     with _lock:
         _evict_expired()

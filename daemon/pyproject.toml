@@ -20,12 +20,19 @@ agent-waked = "agent_waked.main:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "mypy>=1.10",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
 
 [build-system]
 requires = ["hatchling"]

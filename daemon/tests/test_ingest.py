@@ -142,18 +142,18 @@ async def test_invalid_signature_403(client, router):
     assert resp.status == 403
 
 
-# ── 500 source mismatch ──────────────────────────────────────────────
+# ── 403 source mismatch ──────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_source_spoofing_500(client, router):
+async def test_source_spoofing_403(client, router):
     body = json.dumps({
         "v": 0, "event_id": "spoof-001", "source": "other",
         "kind": "alert", "content": "pwn", "meta": {}, "wake": True,
     }).encode()
     resp = await _make_request(client, body)
-    assert resp.status == 500
+    assert resp.status == 403
     data = await resp.json()
-    assert data == {"error": "source mismatch"}
+    assert data == {"error": "unknown source or invalid signature"}
     assert "other" not in json.dumps(data)
     assert len(router.delivered) == 0
 

@@ -10,6 +10,7 @@ import fcntl
 import json
 import logging
 import os
+import time as _time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("agent_waked.socket_server")
 
 MAX_CONNECTIONS = 16
+PING_INTERVAL = 30.0
+PONG_TIMEOUT = 10.0
 
 
 class ClientConnection:
@@ -50,6 +53,7 @@ class ClientConnection:
         self.sources = sources
         self._reader = reader
         self._writer = writer
+        self.pending_ping: bool = False
 
     async def send_frame(self, frame: dict) -> None:
         self._writer.write(encode_frame(frame))
@@ -91,6 +95,7 @@ class SocketServer:
         self._server: asyncio.Server | None = None
         self._lock_fd: int | None = None
         self._connections: dict[str, ClientConnection] = {}
+        self._heartbeat_task: asyncio.Task | None = None
 
     @property
     def connections(self) -> dict[str, ClientConnection]:
@@ -109,8 +114,14 @@ class SocketServer:
             )
         self._lock_fd = lock_fd
 
-        if self._socket_path.is_socket():
+        try:
             self._socket_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot remove stale socket {self._socket_path}: {exc}"
+            ) from exc
 
         self._server = await asyncio.start_unix_server(
             self._handle_connection,
@@ -120,6 +131,37 @@ class SocketServer:
         os.chmod(self._socket_path, 0o600)
         log.info("unix socket bound at %s", self._socket_path)
 
+        self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self) -> None:
+        """Send pings every PING_INTERVAL; close connections that don't pong."""
+        while True:
+            await asyncio.sleep(PING_INTERVAL)
+            now = _time.monotonic()
+            stale: list[str] = []
+            for session_id, conn in list(self._connections.items()):
+                if conn.pending_ping:
+                    # No pong received since last ping — dead connection
+                    log.warning(
+                        "heartbeat timeout session_id=%s, closing", session_id
+                    )
+                    stale.append(session_id)
+                    continue
+                try:
+                    await conn.send_frame({"type": "ping"})
+                    conn.pending_ping = True
+                except Exception:
+                    log.warning(
+                        "heartbeat ping failed session_id=%s, closing",
+                        session_id,
+                    )
+                    stale.append(session_id)
+            for session_id in stale:
+                # Close the writer to trigger _handle_connection's finally block,
+                # which owns the _connections pop and router unsubscribe.
+                if session_id in self._connections:
+                    self._connections[session_id].close()
+
     async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
@@ -127,9 +169,10 @@ class SocketServer:
     ) -> None:
         session_id = str(ULID())
         log.info("new connection pending, session_id=%s", session_id)
+        conn: ClientConnection | None = None
 
         try:
-            await self._handshake(session_id, reader, writer)
+            conn = await self._handshake(session_id, reader, writer)
         except BadFrameError:
             await self._send_error(writer, "bad_frame", "malformed JSON", fatal=True)
             writer.close()
@@ -138,12 +181,12 @@ class SocketServer:
             await self._send_error(writer, "frame_too_large", "line exceeded 1 MiB", fatal=True)
             writer.close()
             return
-        except (ConnectionError, Exception) as exc:
+        except Exception as exc:
             log.warning("handshake failed for session_id=%s: %s", session_id, exc)
             writer.close()
             return
 
-        conn = self._connections[session_id]
+        assert conn is not None
         try:
             await self._frame_loop(conn)
         except ConnectionError:
@@ -161,7 +204,7 @@ class SocketServer:
         session_id: str,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-    ) -> None:
+    ) -> ClientConnection:
         frame = await _read_frame(reader)
         ftype = frame.get("type")
 
@@ -195,10 +238,9 @@ class SocketServer:
             writer=writer,
         )
         self._connections[session_id] = conn
+        self._router.subscribe(session_id, adapter, instance, sources, conn)
 
         accepted = self._router.accepted_sources_for(adapter, sources)
-
-        self._router.subscribe(session_id, adapter, instance, sources, conn)
 
         ack = {
             "type": "hello_ack",
@@ -214,6 +256,7 @@ class SocketServer:
             instance,
             accepted,
         )
+        return conn
 
     async def _frame_loop(self, conn: ClientConnection) -> None:
         while True:
@@ -250,6 +293,10 @@ class SocketServer:
                     conn.session_id,
                     frame.get("ack_id"),
                 )
+                self._router.resolve_ack(frame.get("ack_id", ""), ftype)
+            elif ftype == "pong":
+                conn.pending_ping = False
+                log.debug("pong from session_id=%s", conn.session_id)
             else:
                 log.warning(
                     "unexpected frame type %s from session_id=%s",
@@ -263,12 +310,31 @@ class SocketServer:
         if self._outbox is None:
             log.error("reply received but no outbox configured")
             return
-        result = await self._outbox.deliver(
-            source=frame["source"],
-            reply_id=frame["reply_id"],
-            in_reply_to=frame["in_reply_to"],
-            content=frame["content"],
-        )
+        try:
+            source = frame["source"]
+            reply_id = frame["reply_id"]
+            in_reply_to = frame["in_reply_to"]
+            content = frame["content"]
+        except KeyError as exc:
+            await self._send_error(
+                conn._writer, "bad_frame", f"reply missing field {exc}", fatal=False
+            )
+            return
+        try:
+            result = await self._outbox.deliver(
+                source=source,
+                reply_id=reply_id,
+                in_reply_to=in_reply_to,
+                content=content,
+            )
+        except Exception as exc:
+            log.warning("reply delivery failed: %s", exc)
+            result = {
+                "reply_id": reply_id,
+                "status": "failed",
+                "http_status": None,
+                "error": str(exc),
+            }
         result_frame = {"type": "reply_result"}
         result_frame.update(result)
         await conn.send_frame(result_frame)
@@ -289,23 +355,17 @@ class SocketServer:
             pass
 
     def close(self) -> None:
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
         if self._server is not None:
             self._server.close()
         for conn in list(self._connections.values()):
             conn.close()
         self._connections.clear()
-        if self._lock_fd is not None:
-            try:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
-            except Exception:
-                pass
-            self._lock_fd = None
-        if self._lock_path.exists():
-            try:
-                self._lock_path.unlink()
-            except Exception:
-                pass
+        # Do NOT release the flock here — hold it until process exit so
+        # a second instance cannot acquire the lock during the drain window.
+        # The OS releases the lock when the file descriptor is closed on exit.
         if self._socket_path.exists():
             try:
                 self._socket_path.unlink()

@@ -1,140 +1,62 @@
 import { describe, expect, test } from "bun:test";
-import { loadConfig } from "../src/config";
-import type { Config } from "../src/config";
-import { mkdirSync, writeFileSync, rmSync } from "fs";
-import { mkdtempSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { loadConfig, ConfigError } from "../src/config";
 
 function writeTmpConfig(data: Record<string, any>): string {
-  const dir = mkdtempSync(join(tmpdir(), "aw-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "aw-oc-test-"));
   const file = join(dir, "config.json");
   writeFileSync(file, JSON.stringify(data));
   return file;
 }
 
-function cleanup(path: string) {
-  try {
-    rmSync(join(path, ".."), { recursive: true, force: true });
-  } catch {}
-}
-
-function withEnv(env: Record<string, string>, fn: () => void) {
-  const saved: Record<string, string | undefined> = {};
-  for (const k of Object.keys(env)) {
-    saved[k] = process.env[k];
-    process.env[k] = env[k];
-  }
-  try {
-    fn();
-  } finally {
-    for (const k of Object.keys(env)) {
-      if (saved[k] === undefined) {
-        delete process.env[k];
-      } else {
-        process.env[k] = saved[k]!;
-      }
-    }
-  }
-}
-
 describe("loadConfig", () => {
-  test("loads a valid config with sources and resolves secrets", () => {
-    const configPath = writeTmpConfig({
-      version: 0,
+  test("accepts a v1 config with sources", () => {
+    const p = writeTmpConfig({
+      version: 1,
       listen: { host: "127.0.0.1", port: 8788 },
-      sources: {
-        demo: { secret_env: "DEMO_SECRET", callback_url: "http://example.com/cb" },
-      },
-      default_callback_url: null,
+      socket_path: "/tmp/test.sock",
+      sources: { demo: { secret_env: "DEMO" } },
     });
-    withEnv({ AGENT_WAKE_CONFIG: configPath, DEMO_SECRET: "shhh" }, () => {
-      const cfg = loadConfig();
-      expect(cfg.version).toBe(0);
-      expect(cfg.host).toBe("127.0.0.1");
-      expect(cfg.port).toBe(8788);
-      expect(cfg.sources["demo"]).toBeDefined();
-      expect(new TextDecoder().decode(cfg.sources["demo"].secret)).toBe("shhh");
-      expect(cfg.sources["demo"].callback_url).toBe("http://example.com/cb");
-    });
+    const cfg = loadConfig(p);
+    expect(cfg.version).toBe(1);
+    expect(cfg.socketPath).toBe("/tmp/test.sock");
+    expect(cfg.sources).toEqual(["demo"]);
   });
 
-  test("rejects config with wrong version", () => {
-    const configPath = writeTmpConfig({ version: 99, sources: {} });
-    withEnv({ AGENT_WAKE_CONFIG: configPath }, () => {
-      expect(() => loadConfig()).toThrow(/version/i);
-    });
-  });
-
-  test("rejects config with missing secret env var", () => {
-    const configPath = writeTmpConfig({
+  test("accepts a v0 config (legacy)", () => {
+    const p = writeTmpConfig({
       version: 0,
       listen: {},
-      sources: {
-        demo: { secret_env: "MISSING_SECRET" },
-      },
+      sources: { a: { secret_env: "X" }, b: { secret_env: "Y" } },
     });
-    withEnv({ AGENT_WAKE_CONFIG: configPath }, () => {
-      expect(() => loadConfig()).toThrow(/not set/i);
-    });
+    const cfg = loadConfig(p);
+    expect(cfg.version).toBe(0);
+    expect(cfg.socketPath).toBeNull();
+    expect(cfg.sources.sort()).toEqual(["a", "b"]);
   });
 
-  test("rejects config with no sources", () => {
-    const configPath = writeTmpConfig({
-      version: 0,
-      sources: {},
-    });
-    withEnv({ AGENT_WAKE_CONFIG: configPath }, () => {
-      expect(() => loadConfig()).toThrow(/at least one source/i);
-    });
+  test("rejects unsupported version", () => {
+    const p = writeTmpConfig({ version: 99, sources: { a: {} } });
+    expect(() => loadConfig(p)).toThrow(ConfigError);
   });
 
-  test("falls back to default host and port when listen is missing", () => {
-    const configPath = writeTmpConfig({
-      version: 0,
-      listen: {},
-      sources: {
-        demo: { secret_env: "DEMO_SECRET" },
-      },
-    });
-    withEnv({ AGENT_WAKE_CONFIG: configPath, DEMO_SECRET: "shhh" }, () => {
-      const cfg = loadConfig();
-      expect(cfg.host).toBe("127.0.0.1");
-      expect(cfg.port).toBe(8788);
-    });
+  test("rejects empty sources", () => {
+    const p = writeTmpConfig({ version: 1, sources: {} });
+    expect(() => loadConfig(p)).toThrow(/at least one source/i);
   });
 
-  test("uses default_callback_url when source has none", () => {
-    const configPath = writeTmpConfig({
-      version: 0,
-      listen: {},
-      sources: {
-        demo: { secret_env: "DEMO_SECRET" },
-      },
-      default_callback_url: "http://fallback.example.com/cb",
-    });
-    withEnv({ AGENT_WAKE_CONFIG: configPath, DEMO_SECRET: "shhh" }, () => {
-      const cfg = loadConfig();
-      expect(cfg.sources["demo"].callback_url).toBe("http://fallback.example.com/cb");
-    });
+  test("rejects missing file", () => {
+    expect(() => loadConfig("/tmp/aw-oc-missing.json")).toThrow(/Failed to load/i);
   });
 
-  test("rejects config file that does not exist", () => {
-    withEnv({ AGENT_WAKE_CONFIG: "/tmp/aw-nonexistent-config.json" }, () => {
-      expect(() => loadConfig()).toThrow(/Failed to load config/i);
+  test("does not require secret_env (daemon owns secrets)", () => {
+    const p = writeTmpConfig({
+      version: 1,
+      sources: { demo: {} },
     });
-  });
-
-  test("rejects source without secret_env field", () => {
-    const configPath = writeTmpConfig({
-      version: 0,
-      listen: {},
-      sources: {
-        demo: {},
-      },
-    });
-    withEnv({ AGENT_WAKE_CONFIG: configPath }, () => {
-      expect(() => loadConfig()).toThrow(/secret_env/i);
-    });
+    const cfg = loadConfig(p);
+    expect(cfg.sources).toEqual(["demo"]);
   });
 });

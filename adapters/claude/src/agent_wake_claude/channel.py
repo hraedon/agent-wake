@@ -1,6 +1,10 @@
 """Emit wake events via Claude Code channel notifications."""
 
+import logging
+
 from ._notify import send
+
+log = logging.getLogger("agent_wake_claude.channel")
 
 
 def emit_wake_event(event: dict) -> None:
@@ -10,6 +14,13 @@ def emit_wake_event(event: dict) -> None:
     channels always trigger a turn (silent inject is not supported in v0).
     """
     if not event.get("wake", True):
+        log.warning(
+            "dropping wake=false event (silent inject not supported on Claude Code v0) "
+            "event_id=%s source=%s kind=%s",
+            event.get("event_id", "?"),
+            event.get("source", "?"),
+            event.get("kind", "?"),
+        )
         return
 
     meta = {

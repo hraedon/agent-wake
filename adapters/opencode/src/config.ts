@@ -1,70 +1,66 @@
-export interface SourceConfig {
-  secret: Uint8Array;
-  callback_url?: string | null;
-}
+/**
+ * Lightweight config loader for the opencode daemon-client adapter.
+ *
+ * The daemon owns HMAC secrets and the HTTP listener. The adapter only
+ * needs the list of source names (for the `hello.filters.sources`
+ * handshake) and an optional `socket_path` override.
+ *
+ * Accepts v0 and v1 config files. v0's `listen`/`port` are tolerated but
+ * unused; a warning is logged if they are set.
+ */
+import { readFileSync } from "fs";
+import { log } from "./log";
 
 export interface Config {
   version: number;
-  host: string;
-  port: number;
-  sources: Record<string, SourceConfig>;
-  default_callback_url: string | null;
+  socketPath: string | null;
+  sources: string[];
 }
 
-import { readFileSync } from "fs";
+export class ConfigError extends Error {}
 
-const DEFAULT_CONFIG_PATH = (() => {
+function defaultConfigPath(): string {
   if (!process.env.HOME) {
-    throw new Error("$HOME is not set; set AGENT_WAKE_CONFIG instead");
+    throw new ConfigError("$HOME is not set; set AGENT_WAKE_CONFIG instead");
   }
   return `${process.env.HOME}/.config/agent-wake/config.json`;
-})();
+}
 
-export function loadConfig(): Config {
-  const configPath = process.env.AGENT_WAKE_CONFIG || DEFAULT_CONFIG_PATH;
+export function loadConfig(path?: string): Config {
+  const configPath = path || process.env.AGENT_WAKE_CONFIG || defaultConfigPath();
 
   let raw: any;
   try {
     raw = JSON.parse(readFileSync(configPath, "utf-8"));
   } catch (e: any) {
-    throw new Error(`Failed to load config from ${configPath}: ${e.message}`);
+    throw new ConfigError(`Failed to load config from ${configPath}: ${e.message}`);
   }
 
-  if (raw.version !== 0) {
-    throw new Error("Unsupported config version. Only version 0 is supported.");
+  const version = raw.version ?? 0;
+  if (version !== 0 && version !== 1) {
+    throw new ConfigError(
+      `Unsupported config version ${JSON.stringify(version)}. Only 0 and 1 are accepted.`
+    );
   }
 
   const listen = raw.listen || {};
-  const config: Config = {
-    version: 0,
-    host: listen.host || "127.0.0.1",
-    port: listen.port || 8788,
-    sources: {},
-    default_callback_url: raw.default_callback_url || null,
+  const host = listen.host || "127.0.0.1";
+  const port = listen.port || 8788;
+  if (host !== "127.0.0.1" || port !== 8788) {
+    log.warn(
+      "host/port are no longer used by the adapter; the daemon owns the HTTP listener"
+    );
+  }
+
+  const sourcesRaw = raw.sources || {};
+  const sources = Object.keys(sourcesRaw);
+  if (sources.length === 0) {
+    throw new ConfigError("At least one source must be configured.");
+  }
+
+  return {
+    version,
+    socketPath: raw.socket_path ?? null,
+    sources,
   };
-
-  const sources = raw.sources || {};
-  if (Object.keys(sources).length === 0) {
-    throw new Error("At least one source must be configured.");
-  }
-
-  for (const [name, info] of Object.entries(sources)) {
-    const src = info as any;
-    const secretEnv = src.secret_env;
-    if (!secretEnv || typeof secretEnv !== "string") {
-      throw new Error(`Source ${name} must have a 'secret_env' string field.`);
-    }
-    const secret = process.env[secretEnv];
-    if (!secret) {
-      throw new Error(
-        `Source ${name} references secret_env ${secretEnv} which is not set`
-      );
-    }
-    config.sources[name] = {
-      secret: new TextEncoder().encode(secret),
-      callback_url: src.callback_url || config.default_callback_url,
-    };
-  }
-
-  return config;
 }

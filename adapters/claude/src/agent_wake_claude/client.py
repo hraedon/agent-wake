@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from .channel import emit_wake_event
@@ -34,16 +35,20 @@ class ReplyResultBus:
 
     _pending: dict[str, list] = {}
     _lock = threading.Lock()
+    _ENTRY_TTL = 120.0  # seconds — evict entries older than this
 
     @classmethod
     def register(cls, reply_id: str) -> None:
         evt = threading.Event()
         with cls._lock:
-            cls._pending[reply_id] = [evt, None]
+            cls._evict_expired()
+            cls._pending[reply_id] = [evt, None, time.monotonic()]
 
     @classmethod
     def deliver(cls, frame: dict) -> None:
-        reply_id = frame.get("reply_id")
+        reply_id: str | None = frame.get("reply_id")
+        if reply_id is None:
+            return
         with cls._lock:
             entry = cls._pending.pop(reply_id, None)
         if entry is not None:
@@ -61,6 +66,14 @@ class ReplyResultBus:
         with cls._lock:
             cls._pending.pop(reply_id, None)
         return None
+
+    @classmethod
+    def _evict_expired(cls) -> None:
+        """Remove entries older than _ENTRY_TTL. Must be called with _lock held."""
+        cutoff = time.monotonic() - cls._ENTRY_TTL
+        expired = [k for k, v in cls._pending.items() if len(v) >= 3 and v[2] < cutoff]
+        for k in expired:
+            cls._pending.pop(k, None)
 
 
 _state_lock = threading.Lock()

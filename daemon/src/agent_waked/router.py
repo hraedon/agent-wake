@@ -7,6 +7,7 @@ daemon-minted ``session_id``) and resolves inbound events to the
 correct subscriber based on the daemon config's ``routing`` block.
 """
 
+import asyncio
 import logging
 
 from ulid import ULID
@@ -14,6 +15,8 @@ from ulid import ULID
 from .socket_server import ClientConnection
 
 log = logging.getLogger("agent_waked.router")
+
+_ACK_TIMEOUT = 30.0
 
 
 class _Subscriber:
@@ -39,6 +42,7 @@ class Router:
         self._config = config
         self._subscribers: dict[str, _Subscriber] = {}
         self._order: list[str] = []
+        self._pending_acks: dict[str, asyncio.Future] = {}
 
     def subscribe(
         self,
@@ -54,6 +58,10 @@ class Router:
 
     def unsubscribe(self, session_id: str) -> None:
         self._subscribers.pop(session_id, None)
+        try:
+            self._order.remove(session_id)
+        except ValueError:
+            pass
 
     async def deliver(self, event: dict) -> str:
         source = event.get("source", "")
@@ -70,7 +78,43 @@ class Router:
             ack_id,
             target.session_id,
         )
+
+        # Track ack in background; don't block the HTTP response
+        asyncio.ensure_future(self._wait_for_ack(source, ack_id, target.session_id))
+
         return "queued"
+
+    async def _wait_for_ack(
+        self, source: str, ack_id: str, session_id: str
+    ) -> None:
+        """Wait for ack/nack with timeout. Logs result; does not block deliver()."""
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending_acks[ack_id] = fut
+        try:
+            result = await asyncio.wait_for(fut, timeout=_ACK_TIMEOUT)
+            log.info(
+                "ack received source=%s ack_id=%s result=%s",
+                source,
+                ack_id,
+                result,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "ack timeout source=%s ack_id=%s session_id=%s timeout=%.0fs",
+                source,
+                ack_id,
+                session_id,
+                _ACK_TIMEOUT,
+            )
+        finally:
+            self._pending_acks.pop(ack_id, None)
+
+    def resolve_ack(self, ack_id: str, frame_type: str) -> None:
+        """Resolve a pending ack/nack future. Called by the socket server."""
+        fut = self._pending_acks.get(ack_id)
+        if fut is not None and not fut.done():
+            fut.set_result(frame_type)
 
     def accepted_sources_for(self, adapter: str, requested: list[str]) -> list[str]:
         """Compute the intersection used in ``hello_ack.accepted_sources``."""
@@ -100,7 +144,9 @@ class Router:
             return None
 
         for sid in reversed(self._order):
-            sub = self._subscribers.get(sid)
-            if sub and source in sub.sources:
+            if sid not in self._subscribers:
+                continue
+            sub = self._subscribers[sid]
+            if source in sub.sources:
                 return sub
         return None

@@ -54,12 +54,27 @@ def load_config() -> dict:
     if not sources_raw:
         raise ConfigError("At least one source must be configured.")
 
+    sources: dict[str, dict] = {}
+    for name, info in sources_raw.items():
+        if not isinstance(info, dict):
+            continue
+        secret_env = info.get("secret_env")
+        secret = None
+        if secret_env and isinstance(secret_env, str):
+            raw_secret = os.environ.get(secret_env)
+            if raw_secret is not None:
+                secret = raw_secret.encode("utf-8")
+        sources[name] = {
+            "secret": secret,
+            "callback_url": info.get("callback_url"),
+        }
+
     config = {
         "version": version,
         "host": host,
         "port": port,
         "socket_path": raw.get("socket_path"),
-        "sources": {name: {} for name in sources_raw},
+        "sources": sources,
         "default_callback_url": raw.get("default_callback_url"),
     }
 

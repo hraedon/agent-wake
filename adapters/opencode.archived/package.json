@@ -1,12 +1,12 @@
 {
   "name": "agent-wake-opencode",
-  "version": "0.1.0",
-  "description": "opencode plugin for agent-wake — daemon-client edition",
+  "version": "0.0.1",
+  "description": "opencode plugin for agent-wake external event signaling",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
-    "test": "bun test"
+    "dev": "bun build src/index.ts --outdir dist --target bun --format esm --watch"
   },
   "peerDependencies": {
     "opencode": "^0.1.0"

@@ -20,6 +20,8 @@ KNOWN_TYPES = frozenset({
     "reply",
     "reply_result",
     "error",
+    "ping",
+    "pong",
 })
 
 
@@ -120,6 +122,14 @@ def _validate_error(frame: dict) -> str | None:
     return _require_str(frame, "code")
 
 
+def _validate_ping(frame: dict) -> str | None:
+    return None
+
+
+def _validate_pong(frame: dict) -> str | None:
+    return None
+
+
 _VALIDATORS = {
     "hello": _validate_hello,
     "hello_ack": _validate_hello_ack,
@@ -129,6 +139,8 @@ _VALIDATORS = {
     "reply": _validate_reply,
     "reply_result": _validate_reply_result,
     "error": _validate_error,
+    "ping": _validate_ping,
+    "pong": _validate_pong,
 }
 
 
@@ -143,10 +155,10 @@ def validate_frame(
     it is structurally sound.
 
     *expected_types*, when provided, restricts which ``type`` values are
-    considered valid.  If the frame's ``type`` is not in *expected_types*
-    **and** is also not a known type, the frame is treated as unknown
+    considered valid. If the frame's ``type`` is not in *expected_types*
+    and is also not a known type, the frame is treated as unknown
     (forward-compat) and ``None`` is returned — the caller should log a
-    warning.  If the type *is* known but not in *expected_types*, the
+    warning. If the type *is* known but not in *expected_types*, the
     caller decides the semantics (e.g. ``unauthenticated`` when hello
     was expected).
     """
@@ -156,6 +168,11 @@ def validate_frame(
     ftype = frame.get("type")
     if not isinstance(ftype, str):
         return "bad_frame"
+
+    if expected_types is not None and ftype not in expected_types:
+        if ftype not in KNOWN_TYPES:
+            return None
+        return "unexpected_type"
 
     validator = _VALIDATORS.get(ftype)
     if validator is None:

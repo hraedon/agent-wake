@@ -38,6 +38,23 @@
 - **`meta`** — `Record<string, string>`. Identifier keys only (letters, digits,
   underscores). Hyphens and other characters are silently stripped by the
   Claude Code channel layer (per the channels-reference spec).
+
+  Two `meta` keys are reserved as routing conventions. The daemon does
+  not interpret them; adapters MAY use them for sub-adapter routing.
+
+  - **`meta.target`** — Canonical sub-adapter routing label. If set,
+    the adapter SHOULD deliver only to sessions/processes that have
+    self-registered for that label (see the `agent_wake_subscribe`
+    tool in the opencode adapter). Adapters that do not implement
+    label routing MAY fall back to broadcast and SHOULD log a warning.
+    Labels are unauthenticated in v1; the namespace is shared and any
+    session can claim any label. Suitable for single-user deployments;
+    multi-user / multi-tenant deployments need scoped labels —
+    see [`design/self-register-plan.md`](../design/self-register-plan.md)
+    §Auth.
+  - **`meta.session_id`** — Direct opencode session-id targeting (legacy).
+    If both `meta.target` and `meta.session_id` are set, `meta.target`
+    wins.
 - **`wake`** — `true` triggers an agent turn. `false` injects context silently
   (useful for "FYI" events that do not need immediate response).
 

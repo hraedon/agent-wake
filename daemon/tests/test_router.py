@@ -8,15 +8,19 @@ from agent_waked.router import Router
 
 
 class MockConnection:
-    def __init__(self, session_id="s1", adapter="claude", sources=None):
+    def __init__(self, session_id="s1", adapter="claude", sources=None, router=None):
         self.session_id = session_id
         self.adapter = adapter
         self.instance = "test"
         self.sources = sources or ["github-actions"]
         self.sent = []
+        self._router = router
 
     async def send_frame(self, frame):
         self.sent.append(frame)
+        # Auto-resolve ack for tests so deliver() doesn't hang
+        if self._router and frame.get("type") == "wake":
+            self._router.resolve_ack(frame.get("ack_id", ""), "ack")
 
     def close(self):
         pass
@@ -104,7 +108,7 @@ class TestSubscribe:
 class TestDeliver:
     async def test_routed_delivers_to_correct_adapter(self):
         r = Router(_config_with_routing())
-        conn = MockConnection("s1", "claude", ["github-actions"])
+        conn = MockConnection("s1", "claude", ["github-actions"], router=r)
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
 
         result = await r.deliver({"source": "github-actions", "event_id": "e1"})
@@ -112,7 +116,7 @@ class TestDeliver:
 
     async def test_routed_no_matching_adapter(self):
         r = Router(_config_with_routing())
-        conn = MockConnection("s1", "claude", ["github-actions"])
+        conn = MockConnection("s1", "claude", ["github-actions"], router=r)
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
 
         result = await r.deliver({"source": "telegram-bot", "event_id": "e2"})
@@ -125,7 +129,7 @@ class TestDeliver:
 
     async def test_legacy_mode_picks_subscriber(self):
         r = Router(_config_legacy())
-        conn = MockConnection("s1", "claude", ["github-actions"])
+        conn = MockConnection("s1", "claude", ["github-actions"], router=r)
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
 
         result = await r.deliver({"source": "github-actions", "event_id": "e4"})
@@ -133,8 +137,8 @@ class TestDeliver:
 
     async def test_legacy_mode_picks_most_recent(self):
         r = Router(_config_legacy())
-        conn1 = MockConnection("s1", "claude", ["github-actions"])
-        conn2 = MockConnection("s2", "claude", ["github-actions"])
+        conn1 = MockConnection("s1", "claude", ["github-actions"], router=r)
+        conn2 = MockConnection("s2", "claude", ["github-actions"], router=r)
         r.subscribe("s1", "claude", "test", ["github-actions"], conn1)
         r.subscribe("s2", "claude", "test", ["github-actions"], conn2)
 
@@ -148,6 +152,8 @@ class TestDeliver:
         class MockConn:
             async def send_frame(self, frame):
                 sent.append(frame)
+                if frame.get("type") == "wake":
+                    r.resolve_ack(frame.get("ack_id", ""), "ack")
 
         conn = MockConn()
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
@@ -167,6 +173,8 @@ class TestDeliver:
         class MockConn:
             async def send_frame(self, frame):
                 sent.append(frame)
+                if frame.get("type") == "wake":
+                    r.resolve_ack(frame.get("ack_id", ""), "ack")
 
         conn = MockConn()
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
@@ -178,7 +186,7 @@ class TestDeliver:
 
     async def test_source_not_in_subscriber_filters(self):
         r = Router(_config_legacy())
-        conn = MockConnection("s1", "claude", ["telegram-bot"])
+        conn = MockConnection("s1", "claude", ["telegram-bot"], router=r)
         r.subscribe("s1", "claude", "test", ["telegram-bot"], conn)
 
         result = await r.deliver({"source": "github-actions", "event_id": "e6"})

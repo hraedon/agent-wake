@@ -25,7 +25,7 @@ wake primitive.
 | [`daemon/`](daemon/) | `agent-waked` — shared ingest daemon | Python 3.11+ |
 | [`core/`](core/) | Shared wire format (docs + examples) | — |
 | [`adapters/claude/`](adapters/claude/) | Claude Code channel plugin (MCP stdio) | Python 3.11+ |
-| [`adapters/opencode.archived/`](adapters/opencode.archived/) | **archived** — pending daemon-based rewrite | TypeScript / Bun |
+| [`adapters/opencode/`](adapters/opencode/) | opencode plugin (daemon client) | TypeScript / Bun |
 | [`tools/`](tools/) | `generate-secret.py`, `fakechat-test.py` | Python 3 |
 | [`examples/`](examples/) | Real-world integration guides | — |
 
@@ -73,9 +73,13 @@ cd adapters/claude && pip install -e .
 claude --dangerously-load-development-channels server:agent-wake-claude
 ```
 
-**opencode:** archived pending the daemon-based rewrite.
+**opencode:**
+```bash
+cd adapters/opencode && bun install && bun run build
+# then register dist/index.js as a plugin in your opencode config
+```
 
-See adapter-specific docs: [`adapters/claude/README.md`](adapters/claude/README.md)
+See adapter-specific docs: [`adapters/claude/README.md`](adapters/claude/README.md), [`adapters/opencode/README.md`](adapters/opencode/README.md)
 
 ### 3. Send a test event
 
@@ -83,7 +87,7 @@ See adapter-specific docs: [`adapters/claude/README.md`](adapters/claude/README.
 bash adapters/claude/examples/demo.sh
 ```
 
-The adapter receives the wake event via the daemon's unix socket and delivers it to your running agent session.
+The daemon receives the wake event via HTTP ingest and routes it to connected adapters, which deliver it to your running agent session.
 
 ## Architecture
 
@@ -116,7 +120,7 @@ External system
 
 **Per-harness adapter:**
 - Claude Code: channel plugin emitting `notifications/claude/channel` with `{ content, meta }`. Requires `--dangerously-load-development-channels server:agent-wake-claude` during the research preview. Connects to the daemon via unix socket.
-- opencode: archived; will return as a daemon client. See `adapters/opencode.archived/` for the prior implementation.
+- opencode: in-process plugin emitting `session.promptAsync` for each wake event. Connects to the daemon via unix socket. See `adapters/opencode.archived/` for the pre-daemon implementation (kept for historical reference).
 
 ## Scope
 
@@ -126,6 +130,78 @@ External system
 ## Real-world examples
 
 - [GitHub Actions webhook → agent-wake](examples/github-actions-webhook.md) — trigger your agent when CI fails.
+- [Substrate webhook → agent-wake](#substrate-integration) — wake your agent on substrate workflow events.
+
+## Substrate integration
+
+[Substrate](/projects/substrate) can push workflow events to agent-wake
+via its webhook system. When a substrate event matches your filter
+(transitions, work_item_types, workflows), substrate POSTs the event to
+the daemon's HTTP ingest with an HMAC-SHA256 signature.
+
+### Setup
+
+1. Generate a shared secret (or reuse an existing one):
+
+```bash
+python3 tools/generate-secret.py
+# export SUBSTRATE_WEBHOOK_SECRET=<hex output>
+```
+
+2. Add a `substrate` source to `~/.config/agent-wake/config.json`:
+
+```json
+{
+  "version": 1,
+  "listen": {"host": "127.0.0.1", "port": 8788},
+  "sources": {
+    "substrate": {
+      "secret_env": "SUBSTRATE_WEBHOOK_SECRET",
+      "callback_url": "http://127.0.0.1:9999/v1/reply"
+    }
+  },
+  "routing": {
+    "substrate": {"adapter": "claude"}
+  }
+}
+```
+
+3. Register agent-wake as a substrate webhook (via the sidecar API or
+   Python SDK):
+
+```python
+from substrate import Substrate
+
+sub = Substrate("postgresql://...")
+sub.register_webhook(
+    url="http://127.0.0.1:8788/",
+    headers={
+        "X-AgentWake-Source": "substrate",
+    },
+    sign_secret=b"<your-hex-secret>",
+    transitions=["finish", "deploy", "alert"],
+)
+```
+
+Substrate will POST matching events to the daemon, which verifies the
+HMAC signature and routes them to the configured adapter. Replies from
+the agent are delivered back to substrate's sidecar reply endpoint (if
+`callback_url` is configured).
+
+### Filtering
+
+Webhook filters are AND'd across fields, OR'd within each field:
+
+```python
+sub.register_webhook(
+    url="http://127.0.0.1:8788/",
+    headers={"X-AgentWake-Source": "substrate"},
+    sign_secret=secret,
+    transitions=["finish"],              # only these transitions
+    work_item_types=["feature", "bug"],  # AND these work-item types
+    workflows=["deploy-v2"],             # AND these workflows
+)
+```
 
 ## Related projects
 
@@ -148,8 +224,9 @@ External system
 ## CI
 
 The daemon and Claude adapter are tested on every push / PR via GitHub Actions (`.github/workflows/ci.yml`):
-- **Python (daemon)**: `cd daemon && pytest -q`
-- **Python (claude adapter)**: `cd adapters/claude && pytest -q`
+- **Python (daemon)**: `mypy src/` + `pytest`
+- **Python (claude adapter)**: `mypy src/` + `pytest` + installability check
+- **TypeScript (opencode adapter)**: `bun run build` + `bun test`
 
 ## License
 

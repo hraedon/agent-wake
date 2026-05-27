@@ -1,47 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Demo script for agent-wake-claude adapter.
-# Assumes the adapter is already running as a Claude Code channel plugin.
+# Demo script: sends a test wake event to the running agent-waked daemon.
+# Requires AGENT_WAKE_DEMO_SECRET to be set (matching the daemon's config).
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${AGENT_WAKE_DEMO_SECRET:-}" ]; then
+  echo "ERROR: AGENT_WAKE_DEMO_SECRET must be set. Generate one with:"
+  echo "  python3 tools/generate-secret.py"
+  echo "Then add it to ~/.config/agent-wake/config.json and export the env var."
+  exit 1
+fi
 
-echo "=== agent-wake-claude curl demo ==="
+DAEMON_URL="${AGENT_WAKE_URL:-http://127.0.0.1:8788}"
+SOURCE="${AGENT_WAKE_SOURCE:-demo}"
 
-# Generate a test secret
-SECRET=$(python3 "$SCRIPT_DIR/../../../tools/generate-secret.py")
-echo "Generated secret: $SECRET"
+BODY=$(jq -n \
+  --arg event_id "demo-$(date +%s)" \
+  --arg source "$SOURCE" \
+  '{v: 0, event_id: $event_id, source: $source, kind: "demo", content: "hello from agent-wake demo.sh", wake: true, meta: {}}')
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AGENT_WAKE_DEMO_SECRET" | awk '{print $2}')
 
-# Write a temporary config file
-CONFIG_DIR=$(mktemp -d)
-CONFIG_FILE="$CONFIG_DIR/config.json"
-cat > "$CONFIG_FILE" <<EOF
-{
-  "version": 0,
-  "listen": {"host": "127.0.0.1", "port": 8788},
-  "sources": {
-    "demo": {
-      "secret_env": "AGENT_WAKE_DEMO_SECRET",
-      "callback_url": null
-    }
-  },
-  "default_callback_url": null
-}
-EOF
-
-export AGENT_WAKE_CONFIG="$CONFIG_FILE"
-export AGENT_WAKE_DEMO_SECRET="$SECRET"
-
-BODY='{"v": 0, "event_id": "01HZXPDEMO0000000000000001", "source": "demo", "kind": "alert", "content": "hello from agent-wake", "wake": true, "meta": {}}'
-SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
-
-echo "Sending wake event..."
-curl -s -X POST http://127.0.0.1:8788/ \
+echo "Sending wake event to $DAEMON_URL ..."
+curl -s -X POST "$DAEMON_URL/" \
   -H "Content-Type: application/json" \
-  -H "X-AgentWake-Source: demo" \
+  -H "X-AgentWake-Source: $SOURCE" \
   -H "X-AgentWake-Signature: sha256=$SIG" \
   -d "$BODY" | python3 -m json.tool
-
-rm -rf "$CONFIG_DIR"
 
 echo "Done."

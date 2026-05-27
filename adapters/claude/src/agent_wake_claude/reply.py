@@ -39,6 +39,10 @@ def handle_reply_tool_call(arguments: dict) -> dict:
             ],
         }
 
+    _MAX_REPLY_SIZE = 65536  # 64 KiB
+    if len(content.encode("utf-8")) > _MAX_REPLY_SIZE:
+        content = content.encode("utf-8")[:_MAX_REPLY_SIZE].decode("utf-8", errors="ignore")
+
     reply_id = str(uuid.uuid4())
     frame = {
         "type": "reply",

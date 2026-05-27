@@ -37,6 +37,15 @@ def load_config() -> dict:
         log.warning("config version 0 is deprecated; upgrade to version 1 and add a 'routing' block")
 
     listen = raw.get("listen", {})
+    routing = raw.get("routing", {})
+    for source_name, route in routing.items():
+        if not isinstance(route, dict):
+            raise ConfigError(f"Routing entry for {source_name!r} must be an object.")
+        if "adapter" in route and not isinstance(route["adapter"], str):
+            raise ConfigError(
+                f"Routing entry for {source_name!r}: 'adapter' must be a string."
+            )
+
     cfg = {
         "version": version,
         "listen": {
@@ -46,7 +55,7 @@ def load_config() -> dict:
         "socket_path": raw.get("socket_path"),
         "sources": {},
         "default_callback_url": raw.get("default_callback_url"),
-        "routing": raw.get("routing", {}),
+        "routing": routing,
     }
 
     sources = raw.get("sources", {})

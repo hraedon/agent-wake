@@ -1,13 +1,28 @@
 # agent-wake-opencode
 
-opencode plugin for agent-wake external event signaling.
+opencode plugin for [agent-wake](../..). Daemon-client edition.
 
-> **Package manager:** bun. `bun.lockb` is the source of truth.
-> `package-lock.json` is npm-incidental and gitignored.
+This plugin **does not** bind a port. It connects to `agent-waked` over a
+unix socket and delivers wake events into live opencode sessions via the
+SDK's `session.promptAsync`. The reply tool forwards `agent_wake_reply`
+calls to the daemon, which owns the outbound HTTPS POST.
+
+## Why this replaces the archived adapter
+
+The previous opencode adapter (`adapters/opencode.archived/`) bound its
+own HTTP port (8788), collided with the Claude adapter when both ran on
+the same host, and called the **synchronous** `client.session.prompt(…)`
+to wake sessions. That call blocks until the agent finishes responding,
+which deadlocked the plugin event loop and manifested as "the event
+never arrives." This rewrite uses `session.promptAsync` ("start if
+needed and return immediately"), which is the correct wake primitive.
+See the [Quirks](#quirks-worth-knowing) section for two more landmines
+that took longer to find than the headline bug.
 
 ## Install
 
-From the repo root:
+Prerequisite: `agent-waked` is running and `~/.config/agent-wake/config.json`
+exists (see [`daemon/README.md`](../../daemon/README.md)).
 
 ```bash
 cd adapters/opencode
@@ -15,132 +30,98 @@ bun install
 bun run build
 ```
 
-This produces `dist/index.js`.
+Then register the plugin in your opencode config — the path to
+`dist/index.js` becomes a `plugin` entry in opencode's config (see
+opencode plugin docs).
 
-## Configure
+## Configuration
 
-1. Generate a shared HMAC secret:
-   ```bash
-   python ../../tools/generate-secret.py
-   ```
-   Export it as an environment variable (e.g., `export AGENT_WAKE_DEMO_SECRET=<output>`).
+The adapter reads the same config file as the daemon
+(`~/.config/agent-wake/config.json`, override with `AGENT_WAKE_CONFIG`).
+It only uses:
 
-2. Create `~/.config/agent-wake/config.json` (or set `AGENT_WAKE_CONFIG` to a custom path):
+- `sources` — the list of source names (used in the daemon `hello`
+  handshake to subscribe to events).
+- `socket_path` — optional explicit unix-socket path. If unset, the
+  adapter resolves `$XDG_RUNTIME_DIR/agent-wake.sock` or falls back to
+  `~/.local/state/agent-wake/agent-wake.sock`.
 
-   ```json
-   {
-     "version": 0,
-     "listen": {"host": "127.0.0.1", "port": 8789},
-     "sources": {
-       "demo": {
-         "secret_env": "AGENT_WAKE_DEMO_SECRET",
-         "callback_url": null
-       }
-     },
-     "default_callback_url": null
-   }
-   ```
+HMAC secrets and callback URLs are owned by the daemon. The adapter
+never sees them.
 
-   See [`core/schema.md`](../../core/schema.md) for the full config spec and
-   [`core/examples/config.json`](../../core/examples/config.json) for a ready-to-copy example.
+## Session targeting
 
-3. Add the plugin to your opencode config (`~/.config/opencode/opencode.json`):
+By default a wake event is delivered to **every** live opencode session
+(via `session.list` → `session.promptAsync` per session). If the event
+carries `meta.session_id`, only that session is targeted.
 
-   ```json
-   {
-     "plugin": [
-       "/absolute/path/to/agent-wake/adapters/opencode/dist/index.js"
-     ]
-   }
-   ```
-
-## Send a test wake event
-
-```bash
-BODY='{"v":0,"event_id":"01HZXPDEMO0000000000000002","source":"demo","kind":"alert","content":"hello","wake":true,"meta":{}}'
-SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$AGENT_WAKE_DEMO_SECRET" | awk '{print $2}')
-curl -s -X POST http://127.0.0.1:8789/ \
-  -H "Content-Type: application/json" \
-  -H "X-AgentWake-Source: demo" \
-  -H "X-AgentWake-Signature: sha256=$SIG" \
-  -d "$BODY"
-```
-
-Or run the demo script:
-
-```bash
-bash examples/demo.sh
-```
-
-## Session tracking
-
-The plugin tracks active sessions via `session.created` / `session.deleted` hooks.
-Wake events are delivered to **all** active sessions by default. Per-session routing
-is deferred to v1.
-
-## Silent inject
-
-opencode supports `noReply: true` when `wake` is false, so silent-inject events
-are delivered without triggering an agent turn.
+`wake: true` (default) triggers a turn. `wake: false` injects silently
+(`noReply: true`) for the next turn.
 
 ## Reply tool
 
-The adapter registers an `agent_wake_reply` tool that the agent can call to
-send a reply back to the event source. Replies are POSTed to the source's
-`callback_url` (best-effort in v0).
+The plugin registers a tool named `agent_wake_reply`:
 
-## Test
+```
+agent_wake_reply(source: string, content: string, in_reply_to?: string)
+```
+
+Behaviour:
+
+- `"sent"` — daemon POSTed successfully (2xx).
+- `"sent (no callback_url configured)"` — source has no callback URL.
+- `"reply delivery failed: <reason>"` — daemon returned a non-2xx,
+  the request timed out, or the daemon connection is down.
+
+## Tests
 
 ```bash
 bun test
-npx tsc --noEmit
 ```
 
-## Secret management
+Tests run against a mock daemon (an in-process unix-socket server) and
+a mock opencode SDK client. There is no live opencode dependency in
+the unit suite.
 
-The adapter uses per-source HMAC-SHA256 shared secrets. Secrets live in
-environment variables (referenced from `config.json` via `secret_env`) and
-must never be written to `config.json` itself.
+## End-to-end smoke test
 
-**Generate a secret:**
+`tools/opencode-smoke-test.py` (at the repo root) runs the full chain
+against a real `opencode serve`:
 
 ```bash
-python ../../tools/generate-secret.py
+# from the agent-wake repo root, with `opencode` on PATH:
+python3 tools/opencode-smoke-test.py
 ```
 
-This prints a 64-character hex string from `secrets.token_hex(32)`. Set it
-as the environment variable named in your config's `secret_env` field. A
-template is provided at `.env.example` — copy it to `.env` and fill in
-values. Both `.env` files are gitignored.
+The script spins up a temporary `agent-waked` daemon and an isolated
+`opencode serve`, registers this plugin, creates a session via the
+opencode HTTP API, POSTs an HMAC-signed wake event to the daemon's
+ingest port, then polls `/session/{id}/message` for the `<wake>` tag.
+PASS on delivery, FAIL with daemon + opencode logs on the failure
+case. Not wired into CI (opencode binary isn't available there);
+it's the gate before tagging.
 
-**Rotation (v0):**
+## Quirks worth knowing
 
-v0 has no zero-downtime rotation. To rotate a secret:
+Three things were learned the hard way during this rewrite — preserved
+in code comments and called out here so a future maintainer doesn't
+relearn them.
 
-1. Stop the adapter (and opencode if it's running).
-2. Generate a new secret with `generate-secret.py`.
-3. Update the env var in `.env` (and re-export it in the running shell).
-4. Restart opencode so the plugin reloads with the new secret.
-5. Update all senders (GitHub Actions, webhooks, etc.) to use the new
-   secret. Senders signing with the old secret will be rejected with 403.
+1. **Only the default export is allowed.** opencode iterates every
+   named export and treats each as a plugin, calling it during
+   config-hook resolution. A non-Plugin named export (e.g. a test
+   helper) crashes the loader with
+   `undefined is not an object (evaluating 'O.config')` — and that
+   crash silently poisons subsequent `session.prompt_async` writes for
+   the lifetime of the server (symptom: 204 + empty session.messages,
+   no error surfaced to the caller).
 
-Any in-flight events signed with the old secret are dropped; senders
-should retry per the schema's retry guidance.
+2. **`session.promptAsync` is the wake primitive.** The synchronous
+   `session.prompt` blocks until the model finishes responding, which
+   deadlocks the plugin event loop. The archived plugin used
+   `session.prompt`; that is why "the wake never arrived."
 
-**File permissions:**
-
-If you store secrets in an env file rather than your shell rc, set its
-permissions to `0600`:
-
-```bash
-chmod 600 .env
-```
-
-The adapter does not enforce this — it reads from `process.env`. The
-0600 advisory applies to the file you source the env from.
-
-## Known v0 limitations
-
-- In-memory deduplication only; restarts clear the window.
-- Replies are best-effort and lost if the session exits before the tool fires.
-- No permission relay (opencode lacks the equivalent primitive).
+3. **The SDK does not throw on 4xx.** `promptAsync` returns
+   `{ data, error, response }` with `error` set on non-2xx. Check it
+   explicitly — `await client.session.promptAsync(...)` succeeding does
+   NOT mean the request succeeded.

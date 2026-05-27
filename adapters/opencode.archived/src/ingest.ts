@@ -78,7 +78,6 @@ export function formatWakeEvent(event: any): string {
   const source = event.source || "";
   const kind = event.kind || "";
   const content = event.content || "";
-  // Escape XML special chars in source/kind/content to prevent injection
   const esc = (s: string) =>
     s
       .replace(/&/g, "&amp;")
@@ -92,7 +91,7 @@ export function formatWakeEvent(event: any): string {
 export function startIngest(
   ctx: any,
   config: Config,
-  activeSessions: Set<string>
+  discoverSessions: () => Promise<string[]>
 ): any {
   const server = Bun.serve({
     hostname: config.host,
@@ -161,29 +160,31 @@ export function startIngest(
         );
       }
 
-      if (activeSessions.size === 0) {
+      const sessionIds = await discoverSessions();
+      if (sessionIds.length === 0) {
         return new Response(
-          JSON.stringify({ status: "queued", event_id: eventId }),
+          JSON.stringify({ status: "no_active_sessions", event_id: eventId }),
           { status: 202, headers: { "Content-Type": "application/json" } }
         );
       }
 
-      for (const sessionId of activeSessions) {
-        try {
-          await ctx.client.session.prompt({
+      for (const sessionId of sessionIds) {
+        ctx.client.session
+          .prompt({
             path: { id: sessionId },
             body: {
               noReply: !event.wake,
               parts: [{ type: "text", text: formatWakeEvent(event) }],
             },
-          });
-        } catch (e: any) {
-          log.warn(`Failed to prompt session ${sessionId}: ${e.message}`);
-        }
+          })
+          .then(() => log.info(`delivered to session ${sessionId}`))
+          .catch((e: any) =>
+            log.warn(`failed to prompt session ${sessionId}: ${e?.message ?? e}`)
+          );
       }
 
       return new Response(
-        JSON.stringify({ status: "queued", event_id: eventId }),
+        JSON.stringify({ status: "queued", event_id: eventId, sessions: sessionIds.length }),
         { status: 202, headers: { "Content-Type": "application/json" } }
       );
     },

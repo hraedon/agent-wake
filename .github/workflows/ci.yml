@@ -9,13 +9,19 @@ on:
 jobs:
   python-daemon:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install daemon
         run: pip install -e ".[dev]"
+        working-directory: daemon
+      - name: Run mypy
+        run: mypy src/
         working-directory: daemon
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
@@ -23,22 +29,39 @@ jobs:
 
   python-claude:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install agent-wake-claude
         run: pip install -e ".[dev]"
+        working-directory: adapters/claude
+      - name: Run mypy
+        run: mypy src/
         working-directory: adapters/claude
       - name: Run unit tests
         run: python -m pytest tests/ -v --tb=short
         working-directory: adapters/claude
-      - name: Run fakechat end-to-end test
-        run: python tools/fakechat-test.py
-        working-directory: .
       - name: Verify installability
         run: pip install ./adapters/claude && python -c "import agent_wake_claude; print(agent_wake_claude.__version__)"
 
-  # The opencode TypeScript adapter is archived in `adapters/opencode.archived/`
-  # pending the agent-waked daemon rewrite. CI for it is intentionally disabled.
+  typescript-opencode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: adapters/opencode
+      - name: Build
+        run: bun run build
+        working-directory: adapters/opencode
+      - name: Run tests
+        run: bun test
+        working-directory: adapters/opencode

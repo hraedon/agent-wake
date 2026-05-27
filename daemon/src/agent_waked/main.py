@@ -7,6 +7,7 @@ immediately; port changes require restart).
 """
 
 import asyncio
+import json as _json
 import logging
 import os
 import signal
@@ -25,6 +26,27 @@ log = logging.getLogger("agent_waked")
 
 _DRAIN_TIMEOUT = 5
 
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version("agent-waked")
+except Exception:
+    _VERSION = "0.1.0"
+
+
+class _JsonFormatter(logging.Formatter):
+    """Emit one JSON object per log line."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry: dict = {
+            "ts": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[1] is not None:
+            entry["exc"] = self.formatException(record.exc_info)
+        return _json.dumps(entry, separators=(",", ":"))
+
 
 def _resolve_socket_path(cfg: dict) -> Path:
     explicit = cfg.get("socket_path")
@@ -36,11 +58,12 @@ def _resolve_socket_path(cfg: dict) -> Path:
     return Path.home() / ".local" / "state" / "agent-wake" / "agent-wake.sock"
 
 
-def _reload_config(cfg: dict, router: Router, outbox: Outbox) -> None:
+def _reload_config(cfg: dict, router: Router) -> None:
     """SIGHUP handler: reload config, update shared state in-place.
 
     Per spec §6.3:
     - New ports require restart (log and ignore).
+    - socket_path changes require restart (log and ignore).
     - New sources/routing take effect immediately.
     - Existing subscribers stay connected; accepted_sources is recomputed
       on next hello_ack only.
@@ -49,6 +72,10 @@ def _reload_config(cfg: dict, router: Router, outbox: Outbox) -> None:
         new_cfg = load_config()
     except ConfigError as e:
         log.error("config reload failed: %s", e)
+        return
+
+    if not new_cfg.get("sources"):
+        log.error("config reload rejected: no sources in new config")
         return
 
     old_listen = cfg.get("listen", {})
@@ -62,19 +89,44 @@ def _reload_config(cfg: dict, router: Router, outbox: Outbox) -> None:
         )
         new_cfg["listen"] = dict(old_listen)
 
-    cfg.clear()
+    old_socket_path = cfg.get("socket_path")
+    new_socket_path = new_cfg.get("socket_path")
+    if old_socket_path != new_socket_path:
+        log.warning(
+            "socket_path change (%s -> %s) requires restart; keeping %s",
+            old_socket_path,
+            new_socket_path,
+            old_socket_path,
+        )
+        new_cfg["socket_path"] = old_socket_path
+
+    # Atomic swap: update in-place, then remove keys no longer present.
+    # This avoids the window where cfg is empty between clear() and update().
     cfg.update(new_cfg)
+    for key in list(cfg.keys()):
+        if key not in new_cfg:
+            del cfg[key]
 
     log.info("config reloaded: %d sources, routing=%s", len(cfg.get("sources", {})), bool(cfg.get("routing")))
 
 
 async def _run() -> int:
     log_level = os.environ.get("AGENT_WAKE_LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        stream=sys.stderr,
-    )
+    log_format = os.environ.get("AGENT_WAKE_LOG_FORMAT", "text")
+
+    if log_format == "json":
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(_JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S%z"))
+        logging.basicConfig(
+            level=getattr(logging, log_level, logging.INFO),
+            handlers=[handler],
+        )
+    else:
+        logging.basicConfig(
+            level=getattr(logging, log_level, logging.INFO),
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            stream=sys.stderr,
+        )
 
     try:
         cfg = load_config()
@@ -92,15 +144,24 @@ async def _run() -> int:
     outbox = Outbox(cfg)
     await outbox.start()
 
-    app = create_ingest_app(cfg, router)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host, port)
-    await site.start()
-    log.info("HTTP ingest listening on %s:%s", host, port)
-
     socket_server = SocketServer(sock_path, router, outbox=outbox)
     await socket_server.start()
+
+    app = create_ingest_app(
+        cfg,
+        router,
+        socket_server=socket_server,
+        version=_VERSION,
+    )
+    runner = web.AppRunner(app)
+    try:
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
+    log.info("HTTP ingest listening on %s:%s", host, port)
 
     stop_event = asyncio.Event()
     reload_event = asyncio.Event()
@@ -120,12 +181,15 @@ async def _run() -> int:
         for p in pending:
             p.cancel()
         if reload_event.is_set():
-            _reload_config(cfg, router, outbox)
+            _reload_config(cfg, router)
 
     log.info("shutting down")
     socket_server.close()
     await outbox.close()
-    await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
+    try:
+        await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("runner cleanup timed out after %ds", _DRAIN_TIMEOUT)
     return 0
 
 
