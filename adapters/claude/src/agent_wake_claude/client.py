@@ -11,6 +11,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from .channel import emit_wake_event
 
@@ -19,7 +20,7 @@ log = logging.getLogger("agent_wake_claude.client")
 PROTOCOL_VERSION = 1
 
 
-def _socket_path(config: dict) -> Path:
+def _socket_path(config: dict[str, Any]) -> Path:
     explicit = config.get("socket_path")
     if explicit:
         return Path(explicit)
@@ -33,7 +34,7 @@ class ReplyResultBus:
     """Thread-safe bus for delivering reply_result frames to the
     synchronous reply tool handler running in the MCP thread."""
 
-    _pending: dict[str, list] = {}
+    _pending: dict[str, list[Any]] = {}
     _lock = threading.Lock()
     _ENTRY_TTL = 120.0  # seconds — evict entries older than this
 
@@ -45,7 +46,7 @@ class ReplyResultBus:
             cls._pending[reply_id] = [evt, None, time.monotonic()]
 
     @classmethod
-    def deliver(cls, frame: dict) -> None:
+    def deliver(cls, frame: dict[str, Any]) -> None:
         reply_id: str | None = frame.get("reply_id")
         if reply_id is None:
             return
@@ -56,13 +57,13 @@ class ReplyResultBus:
             entry[0].set()
 
     @classmethod
-    def wait_result(cls, reply_id: str, timeout: float = 35.0) -> dict | None:
+    def wait_result(cls, reply_id: str, timeout: float = 35.0) -> dict[str, Any] | None:
         with cls._lock:
             entry = cls._pending.get(reply_id)
         if entry is None:
             return None
         if entry[0].wait(timeout):
-            return entry[1]
+            return entry[1]  # type: ignore[no-any-return]
         with cls._lock:
             cls._pending.pop(reply_id, None)
         return None
@@ -81,7 +82,7 @@ _current_writer: asyncio.StreamWriter | None = None
 _event_loop: asyncio.AbstractEventLoop | None = None
 
 
-def send_reply_frame(frame: dict) -> None:
+def send_reply_frame(frame: dict[str, Any]) -> None:
     """Send a reply frame from the synchronous MCP handler thread."""
     with _state_lock:
         writer = _current_writer
@@ -92,12 +93,12 @@ def send_reply_frame(frame: dict) -> None:
     future.result(timeout=5)
 
 
-async def _async_send(writer: asyncio.StreamWriter, frame: dict) -> None:
+async def _async_send(writer: asyncio.StreamWriter, frame: dict[str, Any]) -> None:
     writer.write((json.dumps(frame) + "\n").encode())
     await writer.drain()
 
 
-async def run_client(config: dict) -> None:
+async def run_client(config: dict[str, Any]) -> None:
     sources = list(config.get("sources", {}).keys())
     sock_path = _socket_path(config)
     backoff = 1.0
@@ -169,7 +170,7 @@ async def _one_session(sock_path: Path, sources: list[str]) -> None:
 
 
 async def _handle_wake(
-    writer: asyncio.StreamWriter, frame: dict
+    writer: asyncio.StreamWriter, frame: dict[str, Any]
 ) -> None:
     ack_id = frame.get("ack_id")
     event = frame.get("event", {})

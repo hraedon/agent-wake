@@ -1,13 +1,14 @@
 """Emit wake events via Claude Code channel notifications."""
 
 import logging
+from typing import Any
 
 from ._notify import send
 
 log = logging.getLogger("agent_wake_claude.channel")
 
 
-def emit_wake_event(event: dict) -> None:
+def emit_wake_event(event: dict[str, Any]) -> None:
     """Translate a wake event into a Claude Code channel notification and send it.
 
     If event["wake"] is False, the event is silently dropped because Claude Code

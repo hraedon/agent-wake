@@ -6,13 +6,14 @@ import json
 import time
 import urllib.request
 import threading
+from typing import Any
 
 from ._notify import send
 from .config import load_config
 
 _PENDING_TTL_SECONDS = 300  # 5 minutes
 
-_pending: dict[str, tuple[dict, float]] = {}
+_pending: dict[str, tuple[dict[str, Any], float]] = {}
 _lock = threading.Lock()
 
 
@@ -30,7 +31,7 @@ def _hmac_sign(secret: bytes, body: bytes) -> str:
     return f"sha256={digest}"
 
 
-def _forward_permission_request(payload: dict, callback_url: str, secret: bytes | None = None) -> None:
+def _forward_permission_request(payload: dict[str, Any], callback_url: str, secret: bytes | None = None) -> None:
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if secret:
@@ -49,7 +50,7 @@ def _forward_permission_request(payload: dict, callback_url: str, secret: bytes 
         pass
 
 
-def handle_permission_request(params: dict) -> None:
+def handle_permission_request(params: dict[str, Any]) -> None:
     """Handle notifications/claude/channel/permission_request from Claude Code."""
     request_id = params.get("request_id", "")
     payload = {
@@ -76,7 +77,7 @@ def handle_permission_request(params: dict) -> None:
         _pending[request_id] = (payload, time.monotonic())
 
 
-def handle_verdict(payload: dict) -> None:
+def handle_verdict(payload: dict[str, Any]) -> None:
     """Process a verdict POSTed to /permission/verdict and relay it to Claude Code."""
     request_id = payload.get("request_id", "")
     behavior = payload.get("behavior", "deny")

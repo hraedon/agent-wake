@@ -7,7 +7,7 @@ no BOM.  Lines longer than 1 MiB trigger ``frame_too_large``.
 """
 
 import json
-from typing import Sequence
+from typing import Any, Sequence
 
 MAX_FRAME_SIZE = 1 * 1024 * 1024  # 1 MiB
 
@@ -37,22 +37,22 @@ class FrameTooLargeError(FrameError):
     pass
 
 
-def encode_frame(frame: dict) -> bytes:
+def encode_frame(frame: dict[str, Any]) -> bytes:
     return (json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def decode_line(line: bytes) -> dict:
-    return json.loads(line)
+def decode_line(line: bytes) -> dict[str, Any]:
+    return json.loads(line)  # type: ignore[no-any-return]
 
 
-def _require_str(frame: dict, key: str) -> str | None:
+def _require_str(frame: dict[str, Any], key: str) -> str | None:
     val = frame.get(key)
     if not isinstance(val, str):
         return "bad_frame"
     return None
 
 
-def _validate_hello(frame: dict) -> str | None:
+def _validate_hello(frame: dict[str, Any]) -> str | None:
     if frame.get("v") != 1:
         return "version_unsupported"
     err = _require_str(frame, "adapter")
@@ -68,7 +68,7 @@ def _validate_hello(frame: dict) -> str | None:
     return None
 
 
-def _validate_hello_ack(frame: dict) -> str | None:
+def _validate_hello_ack(frame: dict[str, Any]) -> str | None:
     if frame.get("v") != 1:
         return "bad_frame"
     err = _require_str(frame, "session_id")
@@ -80,7 +80,7 @@ def _validate_hello_ack(frame: dict) -> str | None:
     return None
 
 
-def _validate_wake(frame: dict) -> str | None:
+def _validate_wake(frame: dict[str, Any]) -> str | None:
     err = _require_str(frame, "ack_id")
     if err:
         return err
@@ -89,18 +89,18 @@ def _validate_wake(frame: dict) -> str | None:
     return None
 
 
-def _validate_ack(frame: dict) -> str | None:
+def _validate_ack(frame: dict[str, Any]) -> str | None:
     return _require_str(frame, "ack_id")
 
 
-def _validate_nack(frame: dict) -> str | None:
+def _validate_nack(frame: dict[str, Any]) -> str | None:
     err = _require_str(frame, "ack_id")
     if err:
         return err
     return _require_str(frame, "reason")
 
 
-def _validate_reply(frame: dict) -> str | None:
+def _validate_reply(frame: dict[str, Any]) -> str | None:
     for key in ("reply_id", "source", "in_reply_to", "content"):
         err = _require_str(frame, key)
         if err:
@@ -108,7 +108,7 @@ def _validate_reply(frame: dict) -> str | None:
     return None
 
 
-def _validate_reply_result(frame: dict) -> str | None:
+def _validate_reply_result(frame: dict[str, Any]) -> str | None:
     err = _require_str(frame, "reply_id")
     if err:
         return err
@@ -118,15 +118,15 @@ def _validate_reply_result(frame: dict) -> str | None:
     return None
 
 
-def _validate_error(frame: dict) -> str | None:
+def _validate_error(frame: dict[str, Any]) -> str | None:
     return _require_str(frame, "code")
 
 
-def _validate_ping(frame: dict) -> str | None:
+def _validate_ping(frame: dict[str, Any]) -> str | None:
     return None
 
 
-def _validate_pong(frame: dict) -> str | None:
+def _validate_pong(frame: dict[str, Any]) -> str | None:
     return None
 
 
@@ -145,7 +145,7 @@ _VALIDATORS = {
 
 
 def validate_frame(
-    frame: dict,
+    frame: dict[str, Any],
     expected_types: set[str] | None = None,
 ) -> str | None:
     """Validate *frame* structure.

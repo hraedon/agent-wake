@@ -12,7 +12,7 @@ import logging
 import os
 import time as _time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ulid import ULID
 
@@ -55,7 +55,7 @@ class ClientConnection:
         self._writer = writer
         self.pending_ping: bool = False
 
-    async def send_frame(self, frame: dict) -> None:
+    async def send_frame(self, frame: dict[str, Any]) -> None:
         self._writer.write(encode_frame(frame))
         await self._writer.drain()
 
@@ -66,7 +66,7 @@ class ClientConnection:
             pass
 
 
-async def _read_frame(reader: asyncio.StreamReader) -> dict:
+async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     try:
         line = await reader.readline()
     except ValueError:
@@ -76,7 +76,7 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict:
     if len(line) > MAX_FRAME_SIZE:
         raise FrameTooLargeError()
     try:
-        return json.loads(line)
+        return json.loads(line)  # type: ignore[no-any-return]
     except json.JSONDecodeError:
         raise BadFrameError()
 
@@ -95,7 +95,7 @@ class SocketServer:
         self._server: asyncio.Server | None = None
         self._lock_fd: int | None = None
         self._connections: dict[str, ClientConnection] = {}
-        self._heartbeat_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     @property
     def connections(self) -> dict[str, ClientConnection]:
@@ -305,7 +305,7 @@ class SocketServer:
                 )
 
     async def _handle_reply(
-        self, conn: ClientConnection, frame: dict
+        self, conn: ClientConnection, frame: dict[str, Any]
     ) -> None:
         if self._outbox is None:
             log.error("reply received but no outbox configured")

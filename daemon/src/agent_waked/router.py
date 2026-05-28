@@ -9,6 +9,7 @@ correct subscriber based on the daemon config's ``routing`` block.
 
 import asyncio
 import logging
+from typing import Any
 
 from ulid import ULID
 
@@ -38,11 +39,11 @@ class _Subscriber:
 
 
 class Router:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict[str, Any]):
         self._config = config
         self._subscribers: dict[str, _Subscriber] = {}
         self._order: list[str] = []
-        self._pending_acks: dict[str, asyncio.Future] = {}
+        self._pending_acks: dict[str, asyncio.Future[str]] = {}
 
     def subscribe(
         self,
@@ -63,7 +64,7 @@ class Router:
         except ValueError:
             pass
 
-    async def deliver(self, event: dict) -> str:
+    async def deliver(self, event: dict[str, Any]) -> str:
         source = event.get("source", "")
         target = self._resolve(source)
         if target is None:
@@ -89,7 +90,7 @@ class Router:
     ) -> None:
         """Wait for ack/nack with timeout. Logs result; does not block deliver()."""
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future[str] = loop.create_future()
         self._pending_acks[ack_id] = fut
         try:
             result = await asyncio.wait_for(fut, timeout=_ACK_TIMEOUT)

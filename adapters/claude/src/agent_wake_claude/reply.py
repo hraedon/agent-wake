@@ -7,11 +7,12 @@ daemon and awaits the matching reply_result via ReplyResultBus.
 """
 
 import uuid
+from typing import Any
 
 from . import client as daemon_client
 
 
-def get_tool_definition() -> dict:
+def get_tool_definition() -> dict[str, Any]:
     return {
         "name": "agent_wake_reply",
         "description": "Reply to an external event source via agent-wake.",
@@ -27,7 +28,7 @@ def get_tool_definition() -> dict:
     }
 
 
-def handle_reply_tool_call(arguments: dict) -> dict:
+def handle_reply_tool_call(arguments: dict[str, Any]) -> dict[str, Any]:
     source = arguments.get("source")
     content = arguments.get("content")
     in_reply_to = arguments.get("in_reply_to")

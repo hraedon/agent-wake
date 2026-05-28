@@ -9,18 +9,19 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("agent_wake_claude.config")
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "agent-wake" / "config.json"
-_cached_config: dict | None = None
+_cached_config: dict[str, Any] | None = None
 
 
 class ConfigError(Exception):
     pass
 
 
-def load_config() -> dict:
+def load_config() -> dict[str, Any]:
     global _cached_config
     if _cached_config is not None:
         return _cached_config
@@ -54,7 +55,7 @@ def load_config() -> dict:
     if not sources_raw:
         raise ConfigError("At least one source must be configured.")
 
-    sources: dict[str, dict] = {}
+    sources: dict[str, dict[str, Any]] = {}
     for name, info in sources_raw.items():
         if not isinstance(info, dict):
             continue

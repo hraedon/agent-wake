@@ -10,21 +10,22 @@ All replies to the client go through _notify.send for thread-safe stdout writing
 
 import json
 import sys
+from typing import Any
 
 from ._notify import send
 from .reply import get_tool_definition, handle_reply_tool_call
 from .permission import handle_permission_request
 
 
-def _reply(req_id, result: dict) -> None:
+def _reply(req_id: Any, result: dict[str, Any]) -> None:
     send({"jsonrpc": "2.0", "id": req_id, "result": result})
 
 
-def _error(req_id, code: int, message: str) -> None:
+def _error(req_id: Any, code: int, message: str) -> None:
     send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
 
-def handle(msg: dict) -> None:
+def handle(msg: dict[str, Any]) -> None:
     """Dispatch a single JSON-RPC message."""
     method = msg.get("method")
     req_id = msg.get("id")

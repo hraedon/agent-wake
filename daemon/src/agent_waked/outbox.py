@@ -10,6 +10,7 @@ backoff (1s / 4s / 16s).  On permanent failure, logs at warning level.
 import asyncio
 import logging
 import time
+from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
 
@@ -23,7 +24,7 @@ _BACKOFF_DELAYS = (1.0, 4.0, 16.0)
 class Outbox:
     def __init__(
         self,
-        config: dict,
+        config: dict[str, Any],
         max_retries: int = _MAX_RETRIES,
         backoff_delays: tuple[float, ...] = _BACKOFF_DELAYS,
     ):
@@ -46,7 +47,7 @@ class Outbox:
         reply_id: str,
         in_reply_to: str,
         content: str,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Deliver a reply to the configured callback URL.
 
         Retries up to ``_MAX_RETRIES`` times with exponential backoff.
