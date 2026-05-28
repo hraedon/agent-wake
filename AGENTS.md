@@ -1,5 +1,7 @@
 # agent-wake — agent orientation
 
+> **Upstream renamed 2026-05-27:** the coordination spine was previously `substrate`; it is now `regista` (Plan 001 consumer migration here, regista Plan 018 upstream). Older design docs and research notes under `design/` that still say "substrate" are intentional historical record.
+
 ## What this project is
 
 External-to-session signaling layer for agent harnesses. See [README.md](README.md)
