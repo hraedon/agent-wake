@@ -13,6 +13,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 
@@ -20,6 +21,7 @@ from .config import ConfigError, load_config
 from .ingest import create_ingest_app
 from .outbox import Outbox
 from .router import Router
+from .secrets.resolver import SecretResolver
 from .socket_server import SocketServer
 
 log = logging.getLogger("agent_waked")
@@ -37,7 +39,7 @@ class _JsonFormatter(logging.Formatter):
     """Emit one JSON object per log line."""
 
     def format(self, record: logging.LogRecord) -> str:
-        entry: dict = {
+        entry: dict[str, Any] = {
             "ts": self.formatTime(record, self.datefmt),
             "level": record.levelname,
             "logger": record.name,
@@ -48,7 +50,7 @@ class _JsonFormatter(logging.Formatter):
         return _json.dumps(entry, separators=(",", ":"))
 
 
-def _resolve_socket_path(cfg: dict) -> Path:
+def _resolve_socket_path(cfg: dict[str, Any]) -> Path:
     explicit = cfg.get("socket_path")
     if explicit:
         return Path(explicit)
@@ -58,7 +60,7 @@ def _resolve_socket_path(cfg: dict) -> Path:
     return Path.home() / ".local" / "state" / "agent-wake" / "agent-wake.sock"
 
 
-def _reload_config(cfg: dict, router: Router) -> None:
+def _reload_config(cfg: dict[str, Any], router: Router, resolver: SecretResolver | None = None) -> None:
     """SIGHUP handler: reload config, update shared state in-place.
 
     Per spec §6.3:
@@ -108,6 +110,14 @@ def _reload_config(cfg: dict, router: Router) -> None:
             del cfg[key]
 
     log.info("config reloaded: %d sources, routing=%s", len(cfg.get("sources", {})), bool(cfg.get("routing")))
+    # Refresh all cached secrets so vault-mode picks up rotations immediately.
+    if resolver is not None:
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            loop.create_task(resolver.refresh_all())
+        except RuntimeError:
+            pass  # No running loop (e.g. unit tests calling _reload_config directly)
 
 
 async def _run() -> int:
@@ -140,6 +150,7 @@ async def _run() -> int:
     sock_path = _resolve_socket_path(cfg)
 
     router = Router(cfg)
+    resolver = SecretResolver(vault_cfg=cfg.get("vault"))
 
     outbox = Outbox(cfg)
     await outbox.start()
@@ -152,6 +163,7 @@ async def _run() -> int:
         router,
         socket_server=socket_server,
         version=_VERSION,
+        resolver=resolver,
     )
     runner = web.AppRunner(app)
     try:
@@ -181,7 +193,7 @@ async def _run() -> int:
         for p in pending:
             p.cancel()
         if reload_event.is_set():
-            _reload_config(cfg, router)
+            _reload_config(cfg, router, resolver=resolver)
 
     log.info("shutting down")
     socket_server.close()

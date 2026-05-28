@@ -74,7 +74,7 @@ class TestReloadConfig:
             router = Router(live_cfg)
             outbox = Outbox(live_cfg)
 
-            _reload_config(live_cfg, router, outbox)
+            _reload_config(live_cfg, router)
 
             assert "source-b" in live_cfg["sources"]
             assert "source-a" in live_cfg["sources"]
@@ -97,7 +97,7 @@ class TestReloadConfig:
             router = Router(live_cfg)
             outbox = Outbox(live_cfg)
 
-            _reload_config(live_cfg, router, outbox)
+            _reload_config(live_cfg, router)
 
             assert live_cfg["listen"]["port"] == 8788
 
@@ -112,7 +112,7 @@ class TestReloadConfig:
         outbox = Outbox(live_cfg)
 
         with patch("agent_waked.main.load_config", side_effect=ConfigError("bad")):
-            _reload_config(live_cfg, router, outbox)
+            _reload_config(live_cfg, router)
 
         assert "source-a" in live_cfg["sources"]
         assert live_cfg["listen"]["port"] == 8788
@@ -140,7 +140,7 @@ class TestReloadConfig:
             router = Router(live_cfg)
             outbox = Outbox(live_cfg)
 
-            _reload_config(live_cfg, router, outbox)
+            _reload_config(live_cfg, router)
 
             assert live_cfg["routing"]["source-a"]["adapter"] == "claude"
             assert "source-b" in live_cfg["sources"]
@@ -166,7 +166,7 @@ class TestReloadConfig:
             outbox = Outbox(live_cfg)
 
             with caplog.at_level(logging.WARNING, logger="agent_waked"):
-                _reload_config(live_cfg, router, outbox)
+                _reload_config(live_cfg, router)
 
             assert any("requires restart" in r.message for r in caplog.records)
 

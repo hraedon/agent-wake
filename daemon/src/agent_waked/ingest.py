@@ -9,15 +9,16 @@ gate + dedupe the handler calls ``Router.deliver(event)``.
 import json
 import logging
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 from ulid import ULID
 
-from .gating import verify_signature
+from .gating import verify_signature, verify_signature_any
 
 if TYPE_CHECKING:
     from .router import Router
+    from .secrets.resolver import SecretResolver
     from .socket_server import SocketServer
 
 log = logging.getLogger("agent_waked.ingest")
@@ -55,7 +56,7 @@ class Dedupe:
         return False
 
 
-def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict:
+def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict[str, Any]:
     """Parse body. If it already looks like a v0 wake event, pass through.
     Otherwise wrap arbitrary JSON as a webhook event.
     """
@@ -88,7 +89,7 @@ def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict:
     }
 
 
-def _json_response(status: int, payload: dict) -> web.Response:
+def _json_response(status: int, payload: dict[str, Any]) -> web.Response:
     return web.Response(
         status=status,
         content_type="application/json",
@@ -97,10 +98,11 @@ def _json_response(status: int, payload: dict) -> web.Response:
 
 
 def create_ingest_app(
-    config: dict,
+    config: dict[str, Any],
     router: "Router",
     socket_server: "SocketServer | None" = None,
     version: str = "0.1.0",
+    resolver: "SecretResolver | None" = None,
 ) -> web.Application:
     dedupe = Dedupe()
 
@@ -116,7 +118,20 @@ def create_ingest_app(
                 403, {"error": "unknown source or invalid signature"}
             )
 
-        if not verify_signature(raw_body, source_cfg["secret"], signature):
+        # Resolve secrets: prefer resolver + secret_uris; fall back to
+        # legacy inline "secret" bytes for tests that build config directly.
+        if resolver is not None and "secret_uris" in source_cfg:
+            try:
+                secrets = await resolver.resolve_all(source_cfg)
+            except Exception:
+                log.exception("failed to resolve secrets for source %r", source)
+                return _json_response(500, {"error": "internal error"})
+            verified = verify_signature_any(raw_body, secrets, signature)
+        else:
+            # Legacy / test path: direct bytes in source_cfg["secret"]
+            verified = verify_signature(raw_body, source_cfg["secret"], signature)
+
+        if not verified:
             return _json_response(
                 403, {"error": "unknown source or invalid signature"}
             )
@@ -148,7 +163,7 @@ def create_ingest_app(
         return _json_response(404, {"error": "not found"})
 
     async def health_handler(request: web.Request) -> web.Response:
-        body: dict = {"status": "ok", "version": version}
+        body: dict[str, Any] = {"status": "ok", "version": version}
         if socket_server is not None:
             body["adapters"] = len(socket_server.connections)
         return _json_response(200, body)

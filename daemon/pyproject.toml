@@ -15,8 +15,12 @@ dependencies = [
 
 [project.scripts]
 agent-waked = "agent_waked.main:main"
+agent-wake = "agent_waked.cli:main"
 
 [project.optional-dependencies]
+vault = [
+    "hvac>=2.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
