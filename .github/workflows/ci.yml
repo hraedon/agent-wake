@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install daemon
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,vault]"
         working-directory: daemon
       - name: Run mypy
         run: mypy src/
