@@ -55,7 +55,7 @@ load-bearing for v0 (they focus on the v1 identity questions).
 
 ### Out of scope for v0
 
-- Identity / signing / `principal_id` (waits for substrate BC-216+)
+- Identity / signing / `principal_id` (waits for regista BC-216+)
 - Multi-user routing (one operator per adapter instance)
 - Cross-org delegation
 - Persistent state — adapters are stateless; configuration lives in
@@ -67,7 +67,7 @@ load-bearing for v0 (they focus on the v1 identity questions).
   separate channel plugins in `claude-plugins-official`; v0 ships
   the webhook ingest pattern and lets the user wire other
   transports themselves
-- Anything that requires changes to substrate
+- Anything that requires changes to regista
 
 ### Defer with explicit hooks
 
@@ -199,7 +199,7 @@ endpoint safe for at-least-once delivery.
 The dedupe window is intentionally in-memory only for v0. After an
 adapter restart, the window is empty and a retry-after-restart MAY
 result in a duplicate wake. Document this; durable dedupe is a v1
-question tied to the same substrate-inbox decision as missed-event
+question tied to the same regista-inbox decision as missed-event
 queueing (see §Open questions in `AGENTS.md`).
 
 *Prior art:* Stripe `Idempotency-Key` headers, GitHub webhook
@@ -229,7 +229,7 @@ crashed before replying) and reconcile via its own state.
 This is a known v0 limitation, not a bug. A durable per-session
 inbox/outbox (Centrifugo-style history recovery, or Temporal
 Signal-With-Start semantics for the wake direction) is a v1+ design
-question deferred to substrate (see `AGENTS.md` open questions).
+question deferred to regista (see `AGENTS.md` open questions).
 Document the loss mode in any sender integration that depends on the
 reply.
 
@@ -639,13 +639,13 @@ The implementation is "done" when:
 9. The README in each adapter directory documents setup, config,
    and a curl-based first-event test.
 10. Neither adapter modifies any file outside its own directory.
-    No substrate changes, no agent-provenance changes.
+    No regista changes, no agent-provenance changes.
 
 ---
 
 ## 10. Things that will tempt you and should be resisted
 
-- **Adding identity / signing now.** You don't have the substrate
+- **Adding identity / signing now.** You don't have the regista
   primitives. Stub the wire format to allow future fields; do not
   add them.
 - **Adding multi-source routing.** v0 has one operator per adapter.

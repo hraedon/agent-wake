@@ -5,7 +5,7 @@ planning. Supersedes the open-questions framing of
 [identity-and-multi-user.md](identity-and-multi-user.md); that document and
 its appended review sections remain the historical record.
 
-**Scope:** v1 substrate changes, v1 agent-wake / agent-provenance schema
+**Scope:** v1 regista changes, v1 agent-wake / agent-provenance schema
 hooks, and the v2 roadmap items each v1 hook enables. Implementation tasks
 should track against this document; design debate should not.
 
@@ -19,12 +19,12 @@ use-case evidence and should be filed as a new breadcrumb.
 
 ### Identity model
 
-- **Identity primitive lives in substrate.** The mapping from identifier
+- **Identity primitive lives in regista.** The mapping from identifier
   to real-world human is a deployment concern.
 - **On-the-wire identifier is opaque.** Implementation uses URI-prefix
   encoding (`key:sha256:...`, `oidc:...`, `did:...`) carried in
   `principal_id`. The prefix is the attestation-type discriminator;
-  substrate's verification path will need a `PrincipalResolver`
+  regista's verification path will need a `PrincipalResolver`
   interface for non-`key:` prefixes (deferred to BC-196 implementation).
 - **Identity is stable across key rotation.** `principal_id` does not
   change when the underlying key rotates. The binding lives in a chain
@@ -84,7 +84,7 @@ use-case evidence and should be filed as a new breadcrumb.
 - **Add `timestamp` to the signing envelope now.** No production
   deployments; the window for backward-compat-free change is now.
 - **Verifier enforces ordering:** `authenticated_at ≤ event.timestamp
-  ≤ TSA.timestamp + tolerance`. Substrate validates structure; the
+  ≤ TSA.timestamp + tolerance`. Regista validates structure; the
   verifier validates semantic consistency.
 - **RFC 3161 anchoring is configurable per deployment.** No hardcoded
   default TSA. Documented examples: FreeTSA, DigiCert public TSA.
@@ -94,18 +94,18 @@ use-case evidence and should be filed as a new breadcrumb.
 
 ### Cross-cutting
 
-- **Substrate-less signing is supported via vendored schema.**
+- **Regista-less signing is supported via vendored schema.**
   `_signing.py` + `_jcs.py` extracted into a standalone library that
-  agent-wake can depend on without pulling in all of substrate. This
+  agent-wake can depend on without pulling in all of regista. This
   is an implementation task, not a design question.
 - **`alg` discriminator is fail-shut.** When BC-196 lands, unknown
   algorithm values cause verification to fail. Never warn-and-continue.
 
 ---
 
-## 2. Substrate change inventory
+## 2. Regista change inventory
 
-Each change is filed as a breadcrumb against substrate; the BC number
+Each change is filed as a breadcrumb against regista; the BC number
 is the authoritative tracking artifact. The table below is the
 roll-up.
 
@@ -137,7 +137,7 @@ Plus existing breadcrumbs that this work depends on or extends:
 ## 3. New event schemas
 
 These are consumer-defined transition types that go through the
-existing `sign_event()` path. Substrate does not need to special-case
+existing `sign_event()` path. Regista does not need to special-case
 them; verifiers do. They are listed here so the agent-provenance
 verifier and the agent-wake adapter can agree on the wire format.
 
@@ -165,7 +165,7 @@ references. The verifier walks the chain to know point-in-time scope.
 ### `key_declaration` (bootstrap)
 
 Signed by the declared key (self-referential). The first event in any
-substrate log used for audit. Documents what public key the operator
+regista log used for audit. Documents what public key the operator
 declared at initialization.
 
 ```json
@@ -296,10 +296,10 @@ archival without breaking the verification chain.
 
 ## 4. Verifier tool contract
 
-The verifier is an offline tool that consumes a substrate log (live
+The verifier is an offline tool that consumes a regista log (live
 or as a bundle) and produces a structured report. It is *not* part of
-substrate; it lives in `agent-provenance`. The contract below is what
-substrate's schema and `sign_event` path are designed to support.
+regista; it lives in `agent-provenance`. The contract below is what
+regista's schema and `sign_event` path are designed to support.
 
 ### What the verifier checks
 
@@ -413,7 +413,7 @@ Items deferred from v1 with their v1 hooks identified:
 | Multi-device users (one principal, multiple devices) | BC-217 (per-principal key resolution) | BC-216 |
 | Log compaction / checkpoints | `checkpoint` event type reservation | BC-221 |
 | Recovery key implementation | BC-218 (role field, with `recovery` value) | None — could ship v1 (Mimo's last bite) |
-| GDPR redaction-by-hash | agent-provenance/README §7 already sketches the schema | None — implementation in agent-provenance, not substrate |
+| GDPR redaction-by-hash | agent-provenance/README §7 already sketches the schema | None — implementation in agent-provenance, not regista |
 | Cross-org delegation (scenario 3) | Existing `on_behalf_of` and `key_declaration` mechanisms | Bootstrap channel via DNS / GitHub / OIDC |
 
 ### Items still open (not blocking v1)
@@ -445,7 +445,7 @@ configuration as fast as possible without locking out v2.
 6. **BC-198 Layer 1** (RFC 3161 timestamping). Independent of BC-196;
    can ship now. Implements Q12's external anchoring.
 7. **Verifier tool v1** (agent-provenance side). Consumes the
-   substrate log, applies the contract above, produces a report.
+   regista log, applies the contract above, produces a report.
 8. **BC-196** (asymmetric signing). The big one. Unlocks the full
    auditor model.
 9. **BC-216** + **BC-217** (key model overhaul). Lands with or
@@ -453,7 +453,7 @@ configuration as fast as possible without locking out v2.
 10. **Session grant v2 implementation** (agent-wake side). Uses
     BC-219's schema and BC-216/217's key model.
 
-Steps 1–5 are pure substrate work, ~all small. Step 6 is an
+Steps 1–5 are pure regista work, ~all small. Step 6 is an
 integration. Step 7 is consumer-side. Steps 8–10 are the v2 build.
 
 ---
@@ -463,7 +463,7 @@ integration. Step 7 is consumer-side. Steps 8–10 are the v2 build.
 - Hosted multi-tenant deployment (out of scope, different project).
 - Cross-org delegation as a primary use case (v2+).
 - Full GDPR compliance (deployment concern beyond redaction-by-hash).
-- Replacement of substrate's HMAC default (BC-196's non-goal is
+- Replacement of regista's HMAC default (BC-196's non-goal is
   explicit: HMAC stays as the zero-config homelab default
   indefinitely).
 - Channels protocol details for the harness-adapter side (lives in

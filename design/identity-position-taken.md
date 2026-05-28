@@ -11,9 +11,9 @@ own views before seeing one particular answer.
 
 ---
 
-## 1. Identity lives in substrate
+## 1. Identity lives in regista
 
-Identity belongs in substrate. Substrate already owns event signing
+Identity belongs in regista. Regista already owns event signing
 (HMAC-SHA256); identity is the semantic layer of what a signature
 *means*. Two projects inventing their own schemes creates a brittle
 mapping problem. BC-196 (asymmetric signing) makes this the natural
@@ -42,7 +42,7 @@ protocol doesn't care.
 
 Matches the stated single-person OSS posture. Scenario 1 ("solo +
 auditors") needs no shared service. Scenario 2 ("small team") works
-with a shared substrate database (substrate already has schema-per-
+with a shared regista database (regista already has schema-per-
 project isolation). Scenario 3 ("cross-org delegation") is a v2+
 problem. A hosted model is a different project with different
 economics — billing, on-call, multi-tenant ops. Don't build it
@@ -116,7 +116,7 @@ This avoids bitrot and keeps dogfooding identical to the real path.
 ## Summary of the shape
 
 ```
-substrate owns identity (opaque ID + pluggable backing)
+regista owns identity (opaque ID + pluggable backing)
          │
          ▼
 agent-wake gated per-user (signed opt-in for cross-user triggers)

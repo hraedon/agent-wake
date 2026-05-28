@@ -8,17 +8,17 @@ for the scope statement.
 ## What's been decided (2026-05-23)
 
 - **Working name only.** "agent-wake" parallels agent-provenance,
-  agent-notes-mcp. Rename if a better name emerges.
+  agent-notes. Rename if a better name emerges.
 - **Two modes**: wake (turn-triggering) and silent inject (next-turn
   context). Same machinery, different flag.
 - **Two initial harness targets**: Claude Code (via channel plugin) and
   opencode (via in-process plugin). Both confirmed feasible from docs
   review; channels API is more standardized but in research preview.
-- **Substrate is the preferred durable-ingest path**, not a hard
-  dependency. HTTP-only ingest should work without substrate for
+- **Regista is the preferred durable-ingest path**, not a hard
+  dependency. HTTP-only ingest should work without regista for
   lightweight cases.
 - **Out of scope**: pipeline orchestration, durable storage,
-  action audit. Composes with substrate / sf2 / agent-provenance,
+  action audit. Composes with regista / sf2 / agent-provenance,
   doesn't replicate.
 
 ## Research findings
@@ -67,10 +67,10 @@ for the scope statement.
   for opencode, only delivered if a session exists at ingest time).
   Temporal's Signal-With-Start is the closest functional analog:
   lazy-init a workflow if none is running, then deliver the signal.
-  Open product decision: does agent-wake want substrate to maintain
+  Open product decision: does agent-wake want regista to maintain
   a per-session inbox so missed events are delivered on next session
   start? This is the same decision as durable post-restart dedupe
-  for `event_id`. Punt to v1 with substrate's involvement, but make
+  for `event_id`. Punt to v1 with regista's involvement, but make
   the call explicitly — "wake hits live sessions only" vs "wake has
   durable delivery semantics" is a real product split.
   See `design/research-findings-round2.md` §3.2.
@@ -94,8 +94,8 @@ for the scope statement.
 - **Multi-user + identity** (joint with [[project-agent-provenance]]):
   three review rounds completed and consolidated into
   [design/v1-implementation-spec.md](design/v1-implementation-spec.md).
-  Locked positions and substrate change inventory ready to drive
-  implementation. Substrate-side gaps filed as BC-214 through BC-221.
+  Locked positions and regista change inventory ready to drive
+  implementation. Regista-side gaps filed as BC-214 through BC-221.
   Round-by-round history preserved in `design/identity-and-multi-user.md`
   and the round-N review files in the same directory.
 
@@ -103,7 +103,7 @@ for the scope statement.
 
 - Posture: single-person OSS, MIT, no commercial pivot pre-designed in.
   Matches agent-provenance.
-- Will use substrate breadcrumbs (via agent-notes-mcp) for defect /
+- Will use regista breadcrumbs (via agent-notes) for defect /
   design tracking once there's code to break.
 - Research-preview caveat for Claude Code channels: the `--channels` flag
   syntax and protocol contract may change. Adapter should isolate the
@@ -111,7 +111,7 @@ for the scope statement.
 
 ## Cross-references
 
-- `/projects/substrate` — coordination spine, hook queue is the durable
+- `/projects/regista` — coordination spine, hook queue is the durable
   ingest path
 - `/projects/agent-provenance` — channel permission-relay primitive is
   useful here; wake events are themselves audit-worthy

@@ -31,27 +31,118 @@ pip install --user -e .
 
 Configuration lives at `~/.config/agent-wake/config.json` (override via `AGENT_WAKE_CONFIG`).
 
-```json
+### Adding a source (recommended: use the CLI)
+
+```bash
+agent-wake secrets add demo --backend env
+```
+
+This generates a 32-byte random secret, writes it to `~/.config/agent-wake/secrets.env`, updates `config.json`, and prints the secret value once:
+
+```
+Secret added for source 'demo'.
+  Backend : env
+  Env var : AGENT_WAKE_DEMO_SECRET
+  Env file: /home/you/.config/agent-wake/secrets.env
+
+Store this secret value — it will not be shown again:
+  <64 hex chars>
+
+Give this value to the sender of wake events for this source.
+```
+
+Give the printed hex value to whoever will be sending HMAC-signed POST requests for that source.
+
+### Manual config (legacy / advanced)
+
+You can still write config.json by hand. Three secret forms are accepted per source (mutually exclusive):
+
+```jsonc
 {
   "version": 1,
   "listen": {"host": "127.0.0.1", "port": 8788},
-  "socket_path": null,
   "sources": {
-    "github-actions": {
-      "secret_env": "AGENT_WAKE_GITHUB_SECRET",
-      "callback_url": null
+    // Legacy: env-var name (still fully supported)
+    "demo": { "secret_env": "AGENT_WAKE_DEMO_SECRET" },
+
+    // New: single URI reference
+    "github-actions": { "secret": "env://AGENT_WAKE_GITHUB_SECRET" },
+
+    // New: rotation window (any-of HMAC verification)
+    "regista": {
+      "secrets": [
+        "vault://secret/data/agent-wake/regista#current",
+        "vault://secret/data/agent-wake/regista#previous"
+      ]
     }
   },
-  "default_callback_url": null,
   "routing": {
     "github-actions": {"adapter": "claude"}
   }
 }
 ```
 
-Each source's HMAC secret is read from the environment variable named in `secret_env` (never written to the config file). The environment variable must be set wherever the daemon runs.
+`routing` is optional. When absent or empty, all sources are delivered to any connected adapter that subscribed to them.
 
-`routing` is optional. When absent or empty, all sources are delivered to any connected adapter that subscribed to them (legacy single-adapter mode).
+### Vault backend
+
+For sources stored in HashiCorp Vault, add a `vault` block to config.json and install the optional extra:
+
+```bash
+pip install -e ".[vault]"
+```
+
+```jsonc
+{
+  "vault": {
+    "addr": "https://vault.internal:8200",
+    "namespace": "engineering",
+    "auth": {
+      "method": "approle",
+      "role_id": "your-role-id",
+      "secret_id_file": "~/.config/agent-wake/vault-secret-id"
+    }
+  }
+}
+```
+
+Then add a vault-backed source:
+
+```bash
+agent-wake secrets add myapp --backend vault --path secret/data/agent-wake/myapp --key value
+```
+
+### Listing sources
+
+```bash
+agent-wake secrets list
+```
+
+Output (no secret material printed):
+
+```
+SOURCE                BACKEND   N_SECRETS   SECRET_URIS
+----------------------------------------------------------------------
+demo                  env       1           env://AGENT_WAKE_DEMO_SECRET
+```
+
+### Rotating a secret
+
+```bash
+agent-wake secrets rotate demo
+```
+
+This generates a new secret, prepends it to `secrets: [...]` (auto-promoting from single to list), trims to 2 entries (current + previous), prints the new value once, and sends SIGHUP to the running daemon. Both old and new secrets verify during the transition window.
+
+After the next rotation, the previous secret is dropped. The key flows for this are covered in [`docs/secret-management.md`](docs/secret-management.md).
+
+### Removing a source
+
+```bash
+agent-wake secrets remove demo
+```
+
+Removes the source from `config.json` and cleans up the env-file entry.
 
 ## Run
 

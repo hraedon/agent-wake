@@ -278,7 +278,7 @@ weight for limited benefit; skip them.
    README.
 2. Tier 2 (when needed). Ship daemon-side labeled subscribers when
    you actually have multi-process use. Same caveat.
-3. Identity v1 (separate work item, paced by substrate BC-196).
+3. Identity v1 (separate work item, paced by regista BC-196).
    When that lands, retrofit labels: enforce
    `label.startsWith(principal_id + ":")` at registration time.
    Stale labels claimed by un-authenticated subscribers expire on

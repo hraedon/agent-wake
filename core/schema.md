@@ -34,6 +34,20 @@
   (e.g., `"github-actions"`, `"datadog"`, `"telegram"`).
 - **`kind`** — Free-form but standardized to a small set: `webhook`, `alert`,
   `message`, `approval_request`, `approval_verdict`.
+
+  **Reserved `kind` values (v1 schema hooks):** The following `kind` values are
+  reserved for identity and session lifecycle events. The daemon delivers them
+  transparently (no special handling); the agent and provenance layer interpret
+  the payload. These are defined in
+  [`design/v1-implementation-spec.md`](../design/v1-implementation-spec.md) §3.
+
+  - **`session_grant`** — Authorizes an agent's ephemeral key to sign events
+    on behalf of a human for a bounded scope and lifetime. Payload fields
+    (carried in `meta`): `meta.grant_event_id`, `meta.grantee_key_fingerprint`,
+    `meta.scope` (comma-separated), `meta.valid_from`, `meta.valid_until`.
+  - **`session_revocation`** — Invalidates a session grant mid-session. Payload
+    fields (in `meta`): `meta.grant_event_id`, `meta.revoked_at`.
+
 - **`content`** — What the agent reads in its context window.
 - **`meta`** — `Record<string, string>`. Identifier keys only (letters, digits,
   underscores). Hyphens and other characters are silently stripped by the
@@ -74,7 +88,7 @@ delivery.
 The dedupe window is intentionally in-memory only for v0. After an adapter
 restart, the window is empty and a retry-after-restart MAY result in a duplicate
 wake. Document this; durable dedupe is a v1 question tied to the same
-substrate-inbox decision as missed-event queueing.
+regista-inbox decision as missed-event queueing.
 
 ---
 
@@ -100,7 +114,7 @@ agent may have acted but crashed before replying) and reconcile via its own
 state.
 
 This is a known v0 limitation, not a bug. A durable per-session inbox/outbox is
-a v1+ design question deferred to substrate.
+a v1+ design question deferred to regista.
 
 ---
 

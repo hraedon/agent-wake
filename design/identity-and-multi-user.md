@@ -11,7 +11,7 @@ seen either project before.
 
 Three projects are relevant. Each is small, single-person OSS, MIT-licensed.
 
-- **substrate** (`/projects/substrate`) — a Python library providing
+- **regista** (`/projects/regista`) — a Python library providing
   durable, event-sourced state for agent pipelines, backed by Postgres.
   It already has HMAC-SHA256 event signing and a hook queue for
   out-of-process event dispatch. Asymmetric signing (per-actor keys
@@ -68,14 +68,14 @@ they each invent their own scheme, the integration boundary becomes a
 mapping problem ("user X in agent-wake is the same as user Y in
 agent-provenance") that is easy to get wrong and hard to audit.
 
-**Tension:** centralizing the primitive in substrate adds a dependency
-both consumers can't easily escape, and substrate's current scope is
+**Tension:** centralizing the primitive in regista adds a dependency
+both consumers can't easily escape, and regista's current scope is
 deliberately harness-agnostic and coordination-focused. Defining
-identity there expands substrate's scope. Defining it outside substrate
+identity there expands regista's scope. Defining it outside regista
 means a fourth project (or just a shared library), which adds setup
 friction.
 
-**Initial take (for debate):** identity belongs in substrate. Substrate
+**Initial take (for debate):** identity belongs in regista. Regista
 already owns event signing; identity is what a signature *means*.
 Adding it doesn't expand scope as much as it sounds — it just makes
 explicit what HMAC signing already assumes implicitly (one signer per
@@ -118,7 +118,7 @@ concern, not a protocol concern? If so, what's the right shape?
 Two ends of a spectrum:
 
 - **Peer model.** Each user runs their own local instance of
-  agent-wake and substrate. They exchange public keys / IDs through
+  agent-wake and regista. They exchange public keys / IDs through
   some out-of-band registry (could be as simple as a JSON file checked
   into a shared repo). No central service. Matches single-person OSS
   posture. Limits some features (cross-user real-time triggers need a
@@ -135,8 +135,8 @@ strongly favors the peer model. But scenario 3 (cross-org delegation)
 is hard without some shared infrastructure.
 
 **Initial take:** peer model first. Scenario 1 needs no shared
-service. Scenario 2 might be solvable with a shared substrate
-database (substrate already has schema-per-project isolation).
+service. Scenario 2 might be solvable with a shared regista
+database (regista already has schema-per-project isolation).
 Scenario 3 is a v2+ problem.
 
 ### 4. How does identity propagate across the three projects?
@@ -188,9 +188,9 @@ this" is much weaker than "user X authorized this and the agent
 executed it under X's authority." Same true in any compliance regime
 that demands a human in the loop.
 
-Substrate already has BC-197 (delegation chain) as a tracked design
+Regista already has BC-197 (delegation chain) as a tracked design
 problem. The question for agent-wake / agent-provenance is what
-delegation primitives they consume from substrate, and what they
+delegation primitives they consume from regista, and what they
 record on top.
 
 ### 6. Auditors as a first-class role
@@ -274,18 +274,18 @@ the right tensions to be visible so we can pick a path with eyes open.
 These positions are the current working hypothesis. They are intended
 for anyone editing or building on top of this system.
 
-### 1. Identity lives in substrate, but the wire schema is vendorable.
+### 1. Identity lives in regista, but the wire schema is vendorable.
 
-Substrate already owns signing; identity is what a signature means.
+Regista already owns signing; identity is what a signature means.
 The canonical registry, rotation log, and revocation log should live
 there, designed alongside BC-196 and BC-197.
 
 However, the *on-the-wire* identity metadata must be a simple,
 JSON-serializable shape that `agent-wake` and `agent-provenance` can
-parse without importing substrate. If a lightweight deployment wants
-to run without substrate, it can implement the same schema with a
+parse without importing regista. If a lightweight deployment wants
+to run without regista, it can implement the same schema with a
 static JSON file or environment variables — but the schema is
-authoritative because substrate defines it.
+authoritative because regista defines it.
 
 ### 2. Opaque ID + side-channel attestation.
 
@@ -305,7 +305,7 @@ code that just carries the `id` around.
 ### 3. Peer model first; hosted is a different project.
 
 Scenario 1 (solo + auditors) needs no shared service. Scenario 2
-(small team) can use a shared Postgres database with substrate's
+(small team) can use a shared Postgres database with regista's
 existing schema-per-project isolation as the escape hatch. Scenario 3
 (cross-org delegation) is explicitly a v2+ problem. We will not design
 or build centralised multi-tenant infrastructure until the core loop
@@ -337,7 +337,7 @@ authority.
 
 If a user wants inherited delegation ("execute Bob's wake under
 Bob's authority"), they must publish a signed delegation policy in
-substrate that explicitly grants it. The provenance recorder then
+regista that explicitly grants it. The provenance recorder then
 emits a `delegated` event showing both identities and the policy
 reference. This is the primitive that satisfies BC-197.
 
@@ -350,7 +350,7 @@ but the consenting identity is the `actor_identity`, not the
 No special "auditor" role type. An auditor is simply another identity
 that has been granted read access to a provenance stream. When an
 auditor attests "I reviewed this log segment," that attestation is
-a signed event in the same substrate-backed log, attributed to the
+a signed event in the same regista-backed log, attributed to the
 auditor's identity.
 
 ### 7. Simple key management: no recovery magic.
@@ -373,8 +373,8 @@ project is not ready to support.
 ### 8. Sender gating is per-user allowlist + signed consent.
 
 `agent-wake` maintains a per-user allowlist of trusted sender
-identities. It is stored as signed configuration in substrate (or a
-local JSON file for substrate-less deployments).
+identities. It is stored as signed configuration in regista (or a
+local JSON file for regista-less deployments).
 
 Cross-user triggers require a signed `trust_consent` event from the
 recipient identity, naming the sender identity and an optional expiry.
@@ -399,17 +399,17 @@ the initial takes in the document, I say so briefly and move on.
 
 ### Q1: Where does the identity primitive live?
 
-**Agree with the initial take: substrate.** The argument is exactly right
-— substrate already owns event signing; identity is what a signature
+**Agree with the initial take: regista.** The argument is exactly right
+— regista already owns event signing; identity is what a signature
 *means*. Making it explicit is a scope refinement, not an expansion.
 A fourth project would create a coordination tax (version alignment,
 separate releases) for a primitive whose entire purpose is to be shared.
 
-One nuance: substrate should own the *primitive* (the on-the-wire shape
+One nuance: regista should own the *primitive* (the on-the-wire shape
 of "who"), but it should not own the *directory* (the mapping from
 identifier to real-world human). That mapping is a deployment concern
 and can live in a config file, an OIDC provider, or a shared registry
-without substrate needing to know about it.
+without regista needing to know about it.
 
 ### Q2: What is the identity primitive?
 
@@ -446,14 +446,14 @@ Scenario 1 (solo + auditors) needs zero shared infrastructure. The user
 generates a keypair, signs events, auditors verify with the public key.
 Done.
 
-Scenario 2 (small team) is solvable with a shared substrate database.
-Substrate already has schema-per-project isolation. Multiple users
+Scenario 2 (small team) is solvable with a shared regista database.
+Regista already has schema-per-project isolation. Multiple users
 writing to the same Postgres instance with separate schemas is almost
 free. The peer model still holds — each user runs their own agent-wake —
-but they agree on a shared substrate instance for the audit log.
+but they agree on a shared regista instance for the audit log.
 
 Scenario 3 (cross-org delegation) does need something more, but it
-doesn't need a hosted service. It needs a shared substrate and a
+doesn't need a hosted service. It needs a shared regista and a
 mechanism for cross-user consent (signed "I trust events from user X"
 records in the log). That's achievable within the peer model. If it
 turns out to need a rendezvous point for real-time cross-user triggers,
@@ -531,7 +531,7 @@ well-known path.**
 - **Generation:** `agent-wake init` (or equivalent) generates an ed25519
   keypair, stores it in `~/.agent-wake/identity.key`. Public key is the
   on-the-wire identifier. No registration flow, no external service.
-- **Rotation:** a signed "key rotation" event in the substrate log.
+- **Rotation:** a signed "key rotation" event in the regista log.
   Contains old key fingerprint, new key fingerprint, signed by old key.
   Verifiers check: (1) the rotation event is validly signed by the old
   key, (2) no events after the rotation are signed by the old key (or
@@ -560,7 +560,7 @@ trust events from key Y"). Removing a sender requires a signed revocation
 event.
 
 This composes with the peer deployment model: consent events are just
-signed records in the substrate log. No central service needed.
+signed records in the regista log. No central service needed.
 
 Cross-user triggers without prior consent should be rejected at the
 agent-wake boundary, before the event reaches the agent's context. This
@@ -583,24 +583,24 @@ in the configuration, not in the implementation.
 
 ## Reader input: opencode agent (2026-05-23)
 
-I've read the doc and reviewed the substrate signing code (`_signing.py`,
-`_keys.py`). A few things surprised me: substrate already has an
+I've read the doc and reviewed the regista signing code (`_signing.py`,
+`_keys.py`). A few things surprised me: regista already has an
 `on_behalf_of` field in the signing envelope and key lifecycle states
 (active/deprecated/revoked). That's more delegation infrastructure than
 the doc implies. My positions on each question:
 
 ### Q1: Where does the identity primitive live?
 
-**Substrate. Agree with the initial take.** The reasoning is sound:
-identity is what a signature means, and substrate already owns signing.
+**Regista. Agree with the initial take.** The reasoning is sound:
+identity is what a signature means, and regista already owns signing.
 The `on_behalf_of` field is already there — it's a `dict | None`, which
 is the right level of flexibility for now. Making identity explicit in
-substrate isn't scope creep; it's naming what's already implicit.
+regista isn't scope creep; it's naming what's already implicit.
 
-One caveat: the identity contract should be narrow. Substrate should
+One caveat: the identity contract should be narrow. Regista should
 define *how to bind a key to an identifier* and *how to verify that
 binding*. It should not become an identity provider, a session manager,
-or an auth service. The boundary is: substrate answers "is this
+or an auth service. The boundary is: regista answers "is this
 signature valid and who does the key belong to?" — not "is this person
 allowed to do X?"
 
@@ -639,7 +639,7 @@ project — one that might happen eventually, but designing for it now
 would bloat the v1 and slow down the thing that actually matters:
 getting the audit trail working for the single-operator case.
 
-For scenario 2 (small team), a shared Postgres substrate database with
+For scenario 2 (small team), a shared Postgres regista database with
 schema-per-project isolation is probably sufficient. Each user still
 runs their own agent-wake instance; they share a durable store. No
 central auth service needed — each user's key identifies them in the
@@ -663,7 +663,7 @@ sender-gating problem (Q8), not a deployment-model problem.
 }
 ```
 
-Substrate's existing `on_behalf_of` field maps to this naturally. The
+Regista's existing `on_behalf_of` field maps to this naturally. The
 `trigger` is who/what caused the wake; the `actor` is whose harness
 executed. When they're the same (solo dogfood), `trigger` and `actor`
 are identical and `on_behalf_of` is null. When delegation happens,
@@ -701,7 +701,7 @@ Code's `claude/channel/permission` relay is a promising primitive here —
 it already forwards structured approval prompts. But building on it is
 v2+ work.
 
-Substrate's existing `on_behalf_of` field is a good place to evolve
+Regista's existing `on_behalf_of` field is a good place to evolve
 into a delegation chain. For v1, it stays null or carries a single
 delegating identity. For v2, it becomes an array of delegation steps.
 
@@ -726,7 +726,7 @@ are signed plaintext and anyone with the public keys can verify.
 
 ### Q7: Key management?
 
-This is where substrate's existing infrastructure is stronger than the
+This is where regista's existing infrastructure is stronger than the
 doc suggests. `_keys.py` already has:
 
 - Key states: active, deprecated, revoked
@@ -736,7 +736,7 @@ doc suggests. `_keys.py` already has:
 
 What's missing:
 
-- **Generation:** a CLI command (`substrate keygen`) that generates a
+- **Generation:** a CLI command (`regista keygen`) that generates a
   keypair (or for HMAC, a random secret) and writes it to the keys
   file. Trivial to add.
 - **Rotation:** already partially handled — mark old key as deprecated,
@@ -774,13 +774,13 @@ instance has its own config. No central allowlist service needed.
 **Single-user is the degenerate case. Agree with initial take.**
 
 Identity should always be present. In single-user dogfood, the identity
-is "the user who generated the key when they installed substrate." The
+is "the user who generated the key when they installed regista." The
 `on_behalf_of` field is null. The trigger and actor are the same
 person. No migration needed — the schema is the same, the semantics
 just degenerate.
 
 The one thing I'd add: make identity optional at the *protocol* level
-but default-populated at the *tool* level. If someone runs substrate
+but default-populated at the *tool* level. If someone runs regista
 without configuring identity (e.g., a quick test), it should still
 work — events just won't have attribution. The moment they configure
 a key, attribution appears. This matches the existing behavior where
@@ -790,7 +790,7 @@ a key, attribution appears. This matches the existing behavior where
 
 | Q | Position |
 |---|----------|
-| 1 | Substrate. Narrow contract: binding + verification, not IdP. |
+| 1 | Regista. Narrow contract: binding + verification, not IdP. |
 | 2 | Opaque ID + key fingerprint, optional external binding. Not DID, not OIDC-as-default. |
 | 3 | Peer model. Shared DB for small teams. Webhook relay for cross-org. |
 | 4 | Record both trigger + actor. In-context metadata is advisory; provenance stamp is authoritative. |
@@ -802,7 +802,7 @@ a key, attribution appears. This matches the existing behavior where
 
 ### Meta-observation
 
-Substrate is closer to ready than the doc implies. The `on_behalf_of`
+Regista is closer to ready than the doc implies. The `on_behalf_of`
 field, key lifecycle states, and `key_id`-tagged signatures are already
 delegation infrastructure. The main gap is asymmetric signing (BC-196)
 — HMAC means the verifier needs the same secret as the signer, which
@@ -813,8 +813,8 @@ layered on top of what exists.
 
 ## Related material
 
-- Substrate roadmap items BC-196 (asymmetric signing) and BC-197
-  (delegation chain) are the substrate-side counterparts to several
+- Regista roadmap items BC-196 (asymmetric signing) and BC-197
+  (delegation chain) are the regista-side counterparts to several
   of the questions above. They are not yet implemented but should be
   designed alongside whatever lands here.
 - `/projects/agent-provenance/product-concepts/001-naming.md` —

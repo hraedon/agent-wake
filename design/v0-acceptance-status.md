@@ -67,7 +67,7 @@ Legend: ✓ = met. ◐ = met-with-caveat. ✗ = not met / deferred.
    section (rotation steps, 0600 advisory) and `.env.example`.
 
 10. ✓ Neither adapter modifies any file outside its own directory; no
-    substrate / agent-provenance changes — verified by git history
+    regista / agent-provenance changes — verified by git history
     (`git log --name-only`); changes since v0 scaffolding are confined
     to `agent-wake/` and a deprecation banner on
     `/projects/wake-probe/server.py` (plan §13 directs this; the
@@ -115,10 +115,10 @@ addressed in v0 and remain v1 work items:
   has a TODO but no structured logging mechanism.
 - Identity / signing / `principal_id` — wire format is open to a future
   `meta` extension; no fields claimed today.
-- Substrate / agent-provenance integration.
+- Regista / agent-provenance integration.
 
 ## Open questions
 
 None blocking v0.0.1. Items above are scoped to v1; the relevant
-design surfaces (substrate inbox, per-session routing) are tracked in
+design surfaces (regista inbox, per-session routing) are tracked in
 `AGENTS.md` and `v1-implementation-spec.md`.

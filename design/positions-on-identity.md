@@ -4,7 +4,7 @@
 **Author:** Antigravity (AI Coding Assistant)  
 **Date:** 2026-05-23
 
-This document outlines structural and cryptographic recommendations for introducing multi-user support to **agent-wake**, **agent-provenance**, and **substrate**. It answers the key design questions proposed in [identity-and-multi-user.md](file:///projects/agent-wake/design/identity-and-multi-user.md).
+This document outlines structural and cryptographic recommendations for introducing multi-user support to **agent-wake**, **agent-provenance**, and **regista**. It answers the key design questions proposed in [identity-and-multi-user.md](file:///projects/agent-wake/design/identity-and-multi-user.md).
 
 ---
 
@@ -27,7 +27,7 @@ sequenceDiagram
     participant AW as agent-wake
     participant AH as Agent Harness
     actor UserB as User B (Operator)
-    participant AP as agent-provenance / substrate
+    participant AP as agent-provenance / regista
 
     UserA->>AW: 1. Send Wake Event (Signed by Key A)
     Note over AW: Verifies Signature A<br/>Checks gating policy
@@ -42,10 +42,10 @@ sequenceDiagram
 ### 1. Where does the user-identity primitive live?
 
 > [!NOTE]
-> **Position:** Identity belongs in **substrate**.
+> **Position:** Identity belongs in **regista**.
 
-* **Why:** Substrate is the durable event store and coordination engine. A cryptographic signature is meaningless without an assertion of *who* owns the signing key. Because substrate already provides event-signing primitives and Postgres-backed durable state, it is the natural place to manage the mapping of public keys to identity metadata.
-* **Impact:** Downstream projects (`agent-wake` and `agent-provenance`) import and consume substrate's identity models, treating substrate as the cryptographic source of truth. This prevents downstream mapping synchronization errors.
+* **Why:** Regista is the durable event store and coordination engine. A cryptographic signature is meaningless without an assertion of *who* owns the signing key. Because regista already provides event-signing primitives and Postgres-backed durable state, it is the natural place to manage the mapping of public keys to identity metadata.
+* **Impact:** Downstream projects (`agent-wake` and `agent-provenance`) import and consume regista's identity models, treating regista as the cryptographic source of truth. This prevents downstream mapping synchronization errors.
 
 ---
 
@@ -79,7 +79,7 @@ sequenceDiagram
 > **Position:** **Collaborative Peer Model first**, with an optional **Stateless Relay** for cross-network coordination.
 
 * **Solo + Auditors:** Zero infrastructure changes. The auditor is just another public key registered on the operator's local machine. The operator shares their signed database logs (or hash chains) with the auditor offline or via read-only file exports.
-* **Small Team:** Team members can share a central Postgres instance (leveraging substrate's schema-per-project isolation) or exchange keys via a git repository (`.agent-keys/` directory in the project repository).
+* **Small Team:** Team members can share a central Postgres instance (leveraging regista's schema-per-project isolation) or exchange keys via a git repository (`.agent-keys/` directory in the project repository).
 * **Cross-Org (Scenario 3):** To bridge firewalls without a hosted SaaS, introduce a **stateless, zero-knowledge HTTP relay**. The relay simply forwards signed JSON payloads between `agent-wake` instances. Since all payloads are cryptographically signed and encrypted by the peers, the relay does not need authentication, database storage, or multi-tenant user management, making it trivial to self-host.
 
 ---
@@ -93,7 +93,7 @@ This permanently binds the operator's execution to the explicit trigger event th
 
 #### Implicit vs. Explicit Propagation
 * **Explicit Context Injection:** The agent harness must inject readable text into the LLM context: `<sender identity="Alice">Hello agent...</sender>`. This allows the agent to reason about permissions and structure its responses appropriately.
-* **Out-of-Band System Stamps:** The agent cannot be trusted to self-report who it is acting for. Therefore, `agent-provenance` and `substrate` must stamp and sign the provenance trail at the *system boundary level* (inside the harness execution environment), completely isolated from the LLM's text output. If the LLM is compromised via prompt injection, the signed audit trail still accurately reflects the physical channels and identities involved.
+* **Out-of-Band System Stamps:** The agent cannot be trusted to self-report who it is acting for. Therefore, `agent-provenance` and `regista` must stamp and sign the provenance trail at the *system boundary level* (inside the harness execution environment), completely isolated from the LLM's text output. If the LLM is compromised via prompt injection, the signed audit trail still accurately reflects the physical channels and identities involved.
 
 ---
 
@@ -110,18 +110,18 @@ To balance autonomous execution with compliance, we propose three tiers of autho
 | **Tier 2** | **Policy-Gated** | The operator pre-authorizes specific actions (e.g., `git read`, `npm test`) for a given trigger sender using a local, signed policy file. | Standard team pipelines and recurring tasks. |
 | **Tier 3** | **Explicit Request-for-Consent** | The agent pauses, sends a secure out-of-band message to the triggering user requesting a signature, and resumes once the signature is returned. | Interactive tasks requiring external authorization. |
 
-This ensures that "acting under delegation" is always backed by a signed, machine-readable policy block or an explicit signature chain in substrate.
+This ensures that "acting under delegation" is always backed by a signed, machine-readable policy block or an explicit signature chain in regista.
 
 ---
 
 ### 6. Auditors as a first-class role
 
-* **Auditing is Verification, not Access:** Auditors do not need real-time read access to running databases. Instead, they ingest **durable audit bundles** (standardized JSON exports of substrate event chains).
+* **Auditing is Verification, not Access:** Auditors do not need real-time read access to running databases. Instead, they ingest **durable audit bundles** (standardized JSON exports of regista event chains).
 * **Cryptographic Attestations:** When an auditor completes a review, they should generate an `AuditAttestation` object containing:
   1. The hash of the latest verified log entry.
   2. The compliance status (e.g., `APPROVED`, `FLAGGED`).
   3. A cryptographic signature using the auditor's key.
-* This attestation is appended to the substrate log, making the audit process itself verifiable and immortalized in the event stream.
+* This attestation is appended to the regista log, making the audit process itself verifiable and immortalized in the event stream.
 
 ---
 

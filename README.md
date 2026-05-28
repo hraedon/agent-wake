@@ -37,26 +37,22 @@ wake primitive.
 pip install --user -e daemon/
 ```
 
-Generate a shared HMAC secret and write a config:
-
-```bash
-python3 tools/generate-secret.py
-# export the output as AGENT_WAKE_DEMO_SECRET
-```
-
-Create `~/.config/agent-wake/config.json`:
+Create `~/.config/agent-wake/config.json` with a minimal skeleton (one empty sources block is enough to start):
 
 ```json
 {
   "version": 1,
   "listen": {"host": "127.0.0.1", "port": 8788},
-  "sources": {
-    "demo": {
-      "secret_env": "AGENT_WAKE_DEMO_SECRET"
-    }
-  },
+  "sources": {},
   "routing": {}
 }
+```
+
+Add a source with the CLI (generates and stores the secret for you):
+
+```bash
+agent-wake secrets add demo --backend env
+# Prints the secret once — give it to whoever sends wake events.
 ```
 
 Start the daemon (foreground for testing, or install as a systemd user service — see [`daemon/README.md`](daemon/README.md)):
@@ -64,6 +60,8 @@ Start the daemon (foreground for testing, or install as a systemd user service �
 ```bash
 agent-waked
 ```
+
+> **Legacy note:** you can also set `"secret_env": "MY_ENV_VAR"` directly in config.json and export the var yourself — this still works and is not going away.
 
 ### 2. Install the adapter for your harness
 
@@ -124,19 +122,19 @@ External system
 
 ## Scope
 
-- **In scope**: daemon (shared ingest port, routing, reply delivery), harness adapters, shared event schema, ingest mechanisms (HTTP, substrate hook consumer), wake / silent-inject modes.
-- **Out of scope (for now)**: pipeline orchestration (sf2's job), durable event storage (substrate's job), action audit (agent-provenance's job). agent-wake composes with these, doesn't replicate them.
+- **In scope**: daemon (shared ingest port, routing, reply delivery), harness adapters, shared event schema, ingest mechanisms (HTTP, regista hook consumer), wake / silent-inject modes.
+- **Out of scope (for now)**: pipeline orchestration (sf2's job), durable event storage (regista's job), action audit (agent-provenance's job). agent-wake composes with these, doesn't replicate them.
 
 ## Real-world examples
 
 - [GitHub Actions webhook → agent-wake](examples/github-actions-webhook.md) — trigger your agent when CI fails.
-- [Substrate webhook → agent-wake](#substrate-integration) — wake your agent on substrate workflow events.
+- [Regista webhook → agent-wake](#regista-integration) — wake your agent on regista workflow events.
 
-## Substrate integration
+## Regista integration
 
-[Substrate](/projects/substrate) can push workflow events to agent-wake
-via its webhook system. When a substrate event matches your filter
-(transitions, work_item_types, workflows), substrate POSTs the event to
+[Regista](/projects/regista) can push workflow events to agent-wake
+via its webhook system. When a regista event matches your filter
+(transitions, work_item_types, workflows), regista POSTs the event to
 the daemon's HTTP ingest with an HMAC-SHA256 signature.
 
 ### Setup
@@ -145,47 +143,47 @@ the daemon's HTTP ingest with an HMAC-SHA256 signature.
 
 ```bash
 python3 tools/generate-secret.py
-# export SUBSTRATE_WEBHOOK_SECRET=<hex output>
+# export REGISTA_WEBHOOK_SECRET=<hex output>
 ```
 
-2. Add a `substrate` source to `~/.config/agent-wake/config.json`:
+2. Add a `regista` source to `~/.config/agent-wake/config.json`:
 
 ```json
 {
   "version": 1,
   "listen": {"host": "127.0.0.1", "port": 8788},
   "sources": {
-    "substrate": {
-      "secret_env": "SUBSTRATE_WEBHOOK_SECRET",
+    "regista": {
+      "secret_env": "REGISTA_WEBHOOK_SECRET",
       "callback_url": "http://127.0.0.1:9999/v1/reply"
     }
   },
   "routing": {
-    "substrate": {"adapter": "claude"}
+    "regista": {"adapter": "claude"}
   }
 }
 ```
 
-3. Register agent-wake as a substrate webhook (via the sidecar API or
+3. Register agent-wake as a regista webhook (via the sidecar API or
    Python SDK):
 
 ```python
-from substrate import Substrate
+from regista import Regista
 
-sub = Substrate("postgresql://...")
+sub = Regista("postgresql://...")
 sub.register_webhook(
     url="http://127.0.0.1:8788/",
     headers={
-        "X-AgentWake-Source": "substrate",
+        "X-AgentWake-Source": "regista",
     },
     sign_secret=b"<your-hex-secret>",
     transitions=["finish", "deploy", "alert"],
 )
 ```
 
-Substrate will POST matching events to the daemon, which verifies the
+Regista will POST matching events to the daemon, which verifies the
 HMAC signature and routes them to the configured adapter. Replies from
-the agent are delivered back to substrate's sidecar reply endpoint (if
+the agent are delivered back to regista's sidecar reply endpoint (if
 `callback_url` is configured).
 
 ### Filtering
@@ -195,7 +193,7 @@ Webhook filters are AND'd across fields, OR'd within each field:
 ```python
 sub.register_webhook(
     url="http://127.0.0.1:8788/",
-    headers={"X-AgentWake-Source": "substrate"},
+    headers={"X-AgentWake-Source": "regista"},
     sign_secret=secret,
     transitions=["finish"],              # only these transitions
     work_item_types=["feature", "bug"],  # AND these work-item types
@@ -205,7 +203,7 @@ sub.register_webhook(
 
 ## Related projects
 
-- `/projects/substrate` — natural durable-ingest path. Hook queue already exists; agent-wake hook target translates events to harness wakes.
+- `/projects/regista` — natural durable-ingest path. Hook queue already exists; agent-wake hook target translates events to harness wakes.
 - `/projects/agent-provenance` — consumer. Channel permission-relay primitive is useful for approval chains; wake events themselves are audit-worthy.
 - `/projects/software-factory-2` — consumer. External events re-entering a pipeline run.
 - `/projects/wake-probe` — testing instrument. The single-file Python MCP server used to validate wake mechanisms during research (deprecated; see `adapters/claude/` for the production plugin).
