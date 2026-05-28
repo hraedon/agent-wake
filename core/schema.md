@@ -69,6 +69,17 @@
   - **`meta.session_id`** — Direct opencode session-id targeting (legacy).
     If both `meta.target` and `meta.session_id` are set, `meta.target`
     wins.
+
+  Identity meta keys (populated by the daemon after HMAC verification;
+  adapters pass them through to the harness and provenance layer):
+
+  - **`meta.trigger_identity`** — `principal_id` of the source that
+    sent the event. Set by the daemon from the source's config
+    `principal_id` field. Absent when the source has no `principal_id`
+    configured (single-user dogfood default).
+  - **`meta.actor_identity`** — `principal_id` of the harness operator.
+    Set by the adapter (not the daemon) if the harness knows the
+    operator's identity. Absent in single-user mode.
 - **`wake`** — `true` triggers an agent turn. `false` injects context silently
   (useful for "FYI" events that do not need immediate response).
 

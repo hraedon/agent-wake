@@ -258,3 +258,11 @@ pytest -q
 ## Architecture
 
 See [`design/v1-daemon-spec.md`](../design/v1-daemon-spec.md) §2 for the full architecture diagram and §4 for the wire protocol.
+
+## Known limitations
+
+- **Live sessions only.** Wake events are delivered to currently-connected adapters. If no adapter is subscribed for a source, the event returns `202 no_subscriber` and is not queued. There is no durable inbox — missed events are lost. A per-session inbox (Signal-With-Start semantics) is a v1.5+ consideration tied to regista's durable storage.
+- **In-memory dedupe.** The 4096-event dedupe window is lost on daemon restart. A retry-after-restart may produce a duplicate wake. Durable dedupe is deferred to v1 with regista's involvement.
+- **No retries on reply delivery.** The outbox POSTs once with a 30-second timeout. Permanent failures are logged at warning level. Durable reply retry is a v1.1+ concern.
+- **Single Unix user per daemon.** The unix socket is protected by filesystem mode (`0600`). Any local process running as the daemon's user can subscribe as any adapter family. Per-user isolation is a v2 concern (see `design/identity-and-multi-user.md`).
+- **Identity allowlists are unauthenticated.** The `X-AgentWake-Identity` header is trusted after HMAC verification of the source. The identity is the source's declared `principal_id`, not a cryptographic proof from the sender. Full cryptographic identity (Ed25519 signatures per sender) requires regista BC-196 and is a v2 feature.

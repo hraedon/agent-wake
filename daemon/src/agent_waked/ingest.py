@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 from ulid import ULID
 
-from .gating import verify_signature, verify_signature_any
+from .gating import check_trigger_identity, verify_signature, verify_signature_any
 
 if TYPE_CHECKING:
     from .router import Router
@@ -136,6 +136,20 @@ def create_ingest_app(
                 403, {"error": "unknown source or invalid signature"}
             )
 
+        # Identity gating: check sender identity against source allowlist.
+        sender_identity = request.headers.get("X-AgentWake-Identity")
+        identity_err = check_trigger_identity(source_cfg, sender_identity)
+        if identity_err:
+            log.warning(
+                "identity check failed source=%s identity=%r reason=%s",
+                source,
+                sender_identity,
+                identity_err,
+            )
+            return _json_response(
+                403, {"error": "unknown source or invalid signature"}
+            )
+
         try:
             event = _build_wake_event(raw_body, source, event_id_header)
         except SourceMismatchError as e:
@@ -147,6 +161,11 @@ def create_ingest_app(
             return _json_response(403, {"error": "unknown source or invalid signature"})
 
         event_id = event["event_id"]
+
+        # Stamp trigger_identity in meta if the source has a principal_id.
+        principal_id = source_cfg.get("principal_id")
+        if principal_id:
+            event.setdefault("meta", {})["trigger_identity"] = principal_id
 
         if dedupe.check(event_id):
             return _json_response(202, {"status": "duplicate", "event_id": event_id})

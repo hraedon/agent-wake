@@ -186,3 +186,164 @@ async def test_no_subscriber_returns_202():
 async def test_other_path_404(client, router):
     resp = await client.get("/other")
     assert resp.status == 404
+
+
+# ── identity stamping ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_trigger_identity_stamped_in_meta():
+    """When source has principal_id, it's stamped as trigger_identity in meta."""
+    config = {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "principal_id": "key:sha256:abc123",
+            },
+        },
+        "routing": {},
+    }
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+
+    body = json.dumps({
+        "v": 0, "event_id": "evt-id-001", "source": "test",
+        "kind": "alert", "content": "hi", "meta": {}, "wake": True,
+    }).encode()
+    sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+    resp = await cli.post("/", data=body, headers={
+        "X-AgentWake-Source": "test",
+        "X-AgentWake-Signature": sig,
+    })
+    assert resp.status == 202
+    assert len(router.delivered) == 1
+    assert router.delivered[0]["meta"]["trigger_identity"] == "key:sha256:abc123"
+    await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_no_principal_id_no_trigger_identity():
+    """When source has no principal_id, trigger_identity is not added."""
+    config = _config()
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+
+    body = json.dumps({
+        "v": 0, "event_id": "evt-id-002", "source": "test",
+        "kind": "alert", "content": "hi", "meta": {}, "wake": True,
+    }).encode()
+    sig = _hmac(b"shhh", body)
+    resp = await cli.post("/", data=body, headers={
+        "X-AgentWake-Source": "test",
+        "X-AgentWake-Signature": sig,
+    })
+    assert resp.status == 202
+    assert len(router.delivered) == 1
+    assert "trigger_identity" not in router.delivered[0]["meta"]
+    await cli.close()
+
+
+# ── identity allowlist enforcement ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_identity_allowlist_accepts_matching_sender():
+    config = {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "allowed_trigger_identities": ["alice", "bob"],
+            },
+        },
+        "routing": {},
+    }
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+
+    body = json.dumps({
+        "v": 0, "event_id": "evt-id-003", "source": "test",
+        "kind": "alert", "content": "hi", "meta": {}, "wake": True,
+    }).encode()
+    sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+    resp = await cli.post("/", data=body, headers={
+        "X-AgentWake-Source": "test",
+        "X-AgentWake-Signature": sig,
+        "X-AgentWake-Identity": "alice",
+    })
+    assert resp.status == 202
+    assert len(router.delivered) == 1
+    await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_allowlist_rejects_unlisted_sender():
+    config = {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "allowed_trigger_identities": ["alice", "bob"],
+            },
+        },
+        "routing": {},
+    }
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+
+    body = json.dumps({
+        "v": 0, "event_id": "evt-id-004", "source": "test",
+        "kind": "alert", "content": "hi", "meta": {}, "wake": True,
+    }).encode()
+    sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+    resp = await cli.post("/", data=body, headers={
+        "X-AgentWake-Source": "test",
+        "X-AgentWake-Signature": sig,
+        "X-AgentWake-Identity": "mallory",
+    })
+    assert resp.status == 403
+    assert len(router.delivered) == 0
+    await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_allowlist_rejects_missing_identity():
+    config = {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "allowed_trigger_identities": ["alice"],
+            },
+        },
+        "routing": {},
+    }
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+
+    body = json.dumps({
+        "v": 0, "event_id": "evt-id-005", "source": "test",
+        "kind": "alert", "content": "hi", "meta": {}, "wake": True,
+    }).encode()
+    sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+    resp = await cli.post("/", data=body, headers={
+        "X-AgentWake-Source": "test",
+        "X-AgentWake-Signature": sig,
+    })
+    assert resp.status == 403
+    assert len(router.delivered) == 0
+    await cli.close()

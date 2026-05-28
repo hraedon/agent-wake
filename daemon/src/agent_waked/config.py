@@ -165,6 +165,8 @@ def load_config() -> dict[str, Any]:
         cfg["sources"][name] = {
             "secret_uris": secret_uris,
             "callback_url": info.get("callback_url") or cfg["default_callback_url"],
+            "principal_id": info.get("principal_id"),
+            "allowed_trigger_identities": info.get("allowed_trigger_identities"),
         }
 
     if needs_vault and not vault_cfg:
