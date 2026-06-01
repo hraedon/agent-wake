@@ -48,7 +48,7 @@ Add a step at the end of your `.github/workflows/ci.yml`:
             --arg source "github-actions" \
             --arg content "Build failed on ${GITHUB_REF_NAME}: ${{ github.event.head_commit.message }}" \
             '{v: 0, event_id: $event_id, source: $source, kind: "alert", content: $content, wake: true, meta: {}}')
-          SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${AGENT_WAKE_SECRET}" | awk '{print $2}')
+          SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${AGENT_WAKE_GITHUB_SECRET}" | awk '{print $2}')
           curl -s -X POST "${AGENT_WAKE_URL}/" \
             -H "Content-Type: application/json" \
             -H "X-AgentWake-Source: github-actions" \
@@ -56,10 +56,10 @@ Add a step at the end of your `.github/workflows/ci.yml`:
             -d "$BODY"
         env:
           AGENT_WAKE_URL: ${{ secrets.AGENT_WAKE_URL }}
-          AGENT_WAKE_SECRET: ${{ secrets.AGENT_WAKE_SECRET }}
+          AGENT_WAKE_GITHUB_SECRET: ${{ secrets.AGENT_WAKE_GITHUB_SECRET }}
 ```
 
-Store `AGENT_WAKE_URL` and `AGENT_WAKE_SECRET` in your repository's **Actions
+Store `AGENT_WAKE_URL` and `AGENT_WAKE_GITHUB_SECRET` in your repository's **Actions
 secrets** (`Settings → Secrets and variables → Actions`).
 
 ---
@@ -116,7 +116,7 @@ Usage in a workflow:
         if: failure()
         with:
           url: ${{ secrets.AGENT_WAKE_URL }}
-          secret: ${{ secrets.AGENT_WAKE_SECRET }}
+          secret: ${{ secrets.AGENT_WAKE_GITHUB_SECRET }}
           content: "Build failed on ${{ github.ref_name }}"
 ```
 
@@ -124,7 +124,7 @@ Usage in a workflow:
 
 ## Security notes
 
-- Rotate the `AGENT_WAKE_SECRET` regularly.
+- Rotate the `AGENT_WAKE_GITHUB_SECRET` regularly.
 - Do **not** log the secret or the raw curl command in Actions logs.
 - Pin the ingest URL to HTTPS in production (even though the default is
   `127.0.0.1:8788` for local testing).

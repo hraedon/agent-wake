@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from aiohttp import ClientSession, ClientTimeout
 
@@ -19,6 +20,15 @@ log = logging.getLogger("agent_waked.outbox")
 _REPLY_TIMEOUT = ClientTimeout(total=30)
 _MAX_RETRIES = 3
 _BACKOFF_DELAYS = (1.0, 4.0, 16.0)
+_ALLOWED_SCHEMES = ("http:", "https:")
+
+
+def _validate_callback_url(url: str) -> str | None:
+    """Return an error string if *url* is unsafe, or None if valid."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"disallowed scheme {parsed.scheme!r}"
+    return None
 
 
 class Outbox:
@@ -67,6 +77,22 @@ class Outbox:
                 "status": "no_callback",
                 "http_status": None,
                 "error": None,
+            }
+
+        url_err = _validate_callback_url(callback_url)
+        if url_err:
+            log.warning(
+                "reply rejected source=%s reply_id=%s url=%s error=%s",
+                source,
+                reply_id,
+                callback_url,
+                url_err,
+            )
+            return {
+                "reply_id": reply_id,
+                "status": "rejected",
+                "http_status": None,
+                "error": url_err,
             }
 
         payload = {

@@ -49,10 +49,15 @@ type Hooks = any;
 let started = false;
 let stopClient: (() => Promise<void>) | null = null;
 let savedCtx: PluginContext | null = null;
+let lastAttemptAt: number = 0;
+const MIN_RETRY_INTERVAL_MS = 5_000;
 
 function ensureClientStarted(): void {
   if (started) return;
   if (!savedCtx) return;
+  const now = Date.now();
+  if (lastAttemptAt && now - lastAttemptAt < MIN_RETRY_INTERVAL_MS) return;
+  lastAttemptAt = now;
   started = true;
   try {
     const config: Config = loadConfig();

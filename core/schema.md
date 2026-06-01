@@ -91,7 +91,7 @@ exponential backoff on non-2xx responses or connection failures (suggested:
 3 retries over 60 seconds, then surface the failure to the operator).
 
 The adapter SHOULD deduplicate by `event_id` within a recent-events window
-(suggested: 256 most-recent ids in memory; no persistence in v0). A duplicate
+(suggested: 4096 most-recent ids in memory; no persistence in v0). A duplicate
 `event_id` returns 202 with `{"status": "duplicate"}` and does NOT wake the
 agent a second time. This makes the ingest endpoint safe for at-least-once
 delivery.

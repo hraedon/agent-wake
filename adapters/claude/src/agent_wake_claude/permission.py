@@ -3,6 +3,7 @@
 import hashlib
 import hmac as hmac_mod
 import json
+import logging
 import time
 import urllib.request
 import threading
@@ -45,9 +46,10 @@ def _forward_permission_request(payload: dict[str, Any], callback_url: str, secr
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             _ = resp.read()
-    except Exception:
-        # Best-effort: permission forwarding may fail silently.
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "permission forward failed: %s", exc
+        )
 
 
 def handle_permission_request(params: dict[str, Any]) -> None:
@@ -81,6 +83,8 @@ def handle_verdict(payload: dict[str, Any]) -> None:
     """Process a verdict POSTed to /permission/verdict and relay it to Claude Code."""
     request_id = payload.get("request_id", "")
     behavior = payload.get("behavior", "deny")
+    if behavior not in ("allow", "deny"):
+        raise ValueError(f"invalid behavior: {behavior!r}")
 
     with _lock:
         _evict_expired()

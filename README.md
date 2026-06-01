@@ -210,14 +210,14 @@ sub.register_webhook(
 
 ## Consumers
 
-- **agent-notes-mcp** ships `agent-notes-bridge`, a small daemon that
+- **agent-notes** ships `agent-notes-bridge`, a small daemon that
   LISTENs on its Postgres `agent_notes_changes` channel and POSTs each
   breadcrumb / memory mutation to an agent-wake HTTP ingest endpoint
   (HMAC-signed, one v0 event per request, `kind=note-change`,
-  `source=agent-notes`). This is the first observed wake source intended
-  to be attested through `agent-provenance`'s harness adapter once both
-  components ship together (Plan 004 decision 60). See
-  `/projects/agent-notes-mcp/README.md` for the bridge config.
+  `source=agent-notes`, `wake=false`). This is the first observed wake
+  source intended to be attested through `agent-provenance`'s harness
+  adapter once both components ship together (Plan 004 decision 60). See
+  `/projects/agent-notes/README.md` for the bridge config.
 
 ## CI
 
