@@ -1,6 +1,6 @@
 # Plan 001 — Consumer migration: substrate → regista
 
-**Status:** Phase 2 of the cross-project rename. **Blocked until substrate Plan 018 completes** and `v0.4.0` is tagged.
+**Status:** Phase 2 of the cross-project rename. **Complete (2026-06-22)** — regista `v0.4.0` tagged; broad grep confirms zero live `substrate` refs (no runtime imports; AGENTS.md callout is the intentional historical-record note). Residual `substrate` occurrences are intentional historical record: `reflections/`, `design/reviews/`, `design/research-*` and `design/round-*` artifacts, and this plan itself.
 **Scope:** agent-wake specifically. See `/projects/RENAME-substrate-to-regista.md` for orchestration context.
 **Substrate refs in this repo:** 31.
 
