@@ -192,6 +192,8 @@ async function handleFrame(
     }
   } else if (t === "reply_result") {
     ReplyResultBus.deliver(frame as ReplyResult);
+  } else if (t === "ping") {
+    socket.write(encodeFrame({ type: "pong" }));
   } else if (t === "error") {
     log.error(`daemon error: ${JSON.stringify(frame)}`);
     if (frame.fatal) socket.end();

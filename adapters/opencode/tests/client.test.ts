@@ -155,6 +155,30 @@ describe("oneSession", () => {
     expect(ack.ack_id).toBe("a1");
   });
 
+  test("ping frame sends pong", async () => {
+    const { dir, path: sockPath } = tmpSocketPath();
+    const daemon = startMockDaemon(sockPath, (socket) => {
+      setTimeout(() => {
+        writeFrame(socket, { type: "hello_ack", v: 1, session_id: "s1", accepted_sources: ["t"] });
+        writeFrame(socket, { type: "ping" });
+        setTimeout(() => socket.end(), 200);
+      }, 30);
+    });
+
+    await oneSession({
+      socketPath: sockPath,
+      sources: ["t"],
+      onWake: async () => {},
+    });
+
+    await daemon.close();
+    rmSync(dir, { recursive: true, force: true });
+
+    const frames = daemon.received[0];
+    const pong = frames.find((f) => f.type === "pong");
+    expect(pong).toBeDefined();
+  });
+
   test("wake handler error sends nack", async () => {
     const { dir, path: sockPath } = tmpSocketPath();
     const daemon = startMockDaemon(sockPath, (socket) => {

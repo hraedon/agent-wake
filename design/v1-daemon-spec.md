@@ -243,10 +243,27 @@ Codes (v1):
 
 If `fatal: true`, the sender closes the connection after writing the frame.
 
+#### 4.3.9 `ping` (daemon → adapter)
+
+```json
+{"type": "ping"}
+```
+
+Sent by the daemon every 30 seconds as an application-layer heartbeat (see §4.4). The adapter MUST reply with a `pong` frame promptly.
+
+#### 4.3.10 `pong` (adapter → daemon)
+
+```json
+{"type": "pong"}
+```
+
+Reply to a `ping` frame. Any adapter that ignores `ping` will be disconnected by the daemon on the next heartbeat check.
+
 ### 4.4 Liveness
 
 - 30-second idle TCP keepalive (`SO_KEEPALIVE`). On stream closure, daemon drops the subscription. Adapter reconnects with backoff (Section 9.3).
-- No application-layer ping in v1. Add if needed in v1.1.
+- Application-layer heartbeat: the daemon sends a `ping` frame (§4.3.9) every 30 seconds. The adapter MUST reply with a `pong` frame (§4.3.10) within the same interval. If the daemon receives no `pong` by the next heartbeat check, it closes the connection. This is a v1 change (not v1.1); the original spec draft deferred this but the implementation shipped it to detect stale connections on Unix-domain sockets, where TCP keepalive alone is sometimes insufficient.
+
 
 ---
 

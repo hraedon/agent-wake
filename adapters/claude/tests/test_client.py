@@ -182,6 +182,38 @@ async def test_nack_on_emit_failure(tmp_path):
     assert daemon_received[0]["ack_id"] == "a1"
 
 
+# ── ping frame sends pong ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ping_sends_pong(tmp_path):
+    sock_path = tmp_path / "test.sock"
+    daemon_received = []
+
+    async def mock_daemon(reader, writer):
+        await reader.readline()
+        ack = {"type": "hello_ack", "v": 1, "session_id": "s1", "accepted_sources": ["test"]}
+        await _write_frame(writer, ack)
+        ping = {"type": "ping"}
+        await _write_frame(writer, ping)
+        resp_line = await asyncio.wait_for(reader.readline(), timeout=2)
+        daemon_received.append(json.loads(resp_line))
+        writer.close()
+
+    server = await asyncio.start_unix_server(mock_daemon, str(sock_path))
+
+    task = asyncio.create_task(_one_session(sock_path, ["test"]))
+    try:
+        await asyncio.wait_for(task, timeout=3)
+    except (ConnectionError, Exception):
+        pass
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert len(daemon_received) == 1
+    assert daemon_received[0]["type"] == "pong"
+
+
 # ── malformed daemon frame ignored ───────────────────────────────────
 
 @pytest.mark.asyncio

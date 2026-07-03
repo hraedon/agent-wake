@@ -157,6 +157,9 @@ async def _one_session(sock_path: Path, sources: list[str]) -> None:
                 await _handle_wake(writer, frame)
             elif t == "reply_result":
                 ReplyResultBus.deliver(frame)
+            elif t == "ping":
+                writer.write((json.dumps({"type": "pong"}) + "\n").encode())
+                await writer.drain()
             elif t == "error":
                 log.error("daemon error: %s", frame)
                 if frame.get("fatal"):
