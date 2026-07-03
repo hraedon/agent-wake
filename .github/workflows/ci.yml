@@ -65,3 +65,22 @@ jobs:
       - name: Run tests
         run: bun test
         working-directory: adapters/opencode
+
+  identifier-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for work-domain identifiers
+        run: |
+          # Patterns that should not appear in public history.
+          # Add patterns here as they are identified during publication scrub.
+          PATTERNS=""
+          if [ -n "$PATTERNS" ]; then
+            if git log --all --oneline | grep -iE "$PATTERNS"; then
+              echo "Work-domain identifiers found in history"
+              exit 1
+            fi
+          fi
+          echo "Identifier gate: clean (no patterns configured yet)"

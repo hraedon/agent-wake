@@ -255,6 +255,82 @@ An event was accepted but no adapter was subscribed for that source. This is a n
 pytest -q
 ```
 
+## Suite integration
+
+agent-wake is a Tier 2 suite component (optional plumbing). When deployed
+as part of the agent suite, it conforms to the suite config and doctor
+contracts.
+
+### Suite config (suite.env)
+
+agent-wake reads the canonical `REGISTA_*` env vars from the suite config
+file (`suite.env`), with the standard precedence:
+
+1. Process environment
+2. Per-user `~/.config/agent-suite/suite.env` (override via `$AGENT_SUITE_CONFIG`)
+3. System `/etc/agent-suite/suite.env`
+
+This is informational for agent-wake today — the daemon's own config is
+`config.json`, not `suite.env`. The suite integration surfaces in `doctor`
+and `install-harness`.
+
+### Doctor (`agent-wake doctor`)
+
+Run health checks:
+
+```bash
+agent-wake doctor            # human-readable
+agent-wake doctor --json     # suite-shaped JSON for aggregation
+```
+
+Checks performed:
+
+| Check | Description |
+|---|---|
+| `config_present` | config.json exists and loads cleanly |
+| `ingress_reachable` | daemon HTTP port responds |
+| `auth_configured` | at least one source has a secret (not open) |
+| `adapters_installed` | at least one adapter binary on PATH |
+| `allowlist_present` | sources with principal_id have identity allowlists |
+
+When suite.env is present, the doctor also reports regista connectivity.
+
+### Install-harness (`agent-wake install-harness`)
+
+Wire wake adapters into harness configs (part of the suite bootstrap):
+
+```bash
+agent-wake install-harness claude          # wire claude adapter
+agent-wake install-harness opencode        # wire opencode plugin
+agent-wake install-harness all             # wire both
+agent-wake install-harness claude --dry-run  # preview changes
+agent-wake install-harness claude --uninstall  # remove wiring
+```
+
+This sets `AGENT_WAKE_CONFIG` in the harness env block and registers the
+opencode plugin path. It is idempotent (re-running is a no-op) and
+preserves existing harness config (merge, not overwrite).
+
+### Container deployment
+
+```bash
+cd daemon
+docker build -t agent-waked .
+docker run -d --name agent-waked \
+  -p 127.0.0.1:8788:8788 \
+  -v ~/.config/agent-wake:/config:ro \
+  -e AGENT_WAKE_CONFIG=/config/config.json \
+  agent-waked
+```
+
+### Windows Service
+
+```bash
+pip install -e ".[windows]"
+python daemon/windows_service.py install
+python daemon/windows_service.py start
+```
+
 ## Architecture
 
 See [`design/v1-daemon-spec.md`](../design/v1-daemon-spec.md) §2 for the full architecture diagram and §4 for the wire protocol.

@@ -9,6 +9,8 @@ Commands:
   remove — drop a source from config.json (and optionally the backend store)
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -29,12 +31,21 @@ _DEFAULT_SECRETS_ENV_FILE = Path.home() / ".config" / "agent-wake" / "secrets.en
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level parser (back-compat for tests that call directly).
+
+    New code should use ``agent_waked.cli.build_parser`` instead.
+    """
     parser = argparse.ArgumentParser(
         prog="agent-wake",
         description="agent-wake operator CLI",
     )
     sub = parser.add_subparsers(dest="command")
+    _build_secrets_parser(sub)
+    return parser
 
+
+def _build_secrets_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Add the ``secrets`` subcommand to an existing subparsers action."""
     secrets_parser = sub.add_parser("secrets", help="Manage source secrets")
     secrets_sub = secrets_parser.add_subparsers(dest="secrets_command")
 
@@ -78,8 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_p.set_defaults(func=_cmd_add)
     rot_p.set_defaults(func=_cmd_rotate)
     rem_p.set_defaults(func=_cmd_remove)
-
-    return parser
 
 
 def _cmd_secrets_help(args: argparse.Namespace) -> int:

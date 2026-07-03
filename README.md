@@ -29,6 +29,22 @@ wake primitive.
 | [`tools/`](tools/) | `generate-secret.py`, `fakechat-test.py` | Python 3 |
 | [`examples/`](examples/) | Real-world integration guides | — |
 
+## Suite integration
+
+agent-wake is a **Tier 2** component of the agent suite — optional for a
+first deployment, but the thing that lets external events (CI, monitors,
+cross-session messages) drive agent work. When deployed as part of the
+suite, it conforms to the shared config, doctor, and install-harness
+contracts:
+
+- **`agent-wake doctor --json`** — health check with the suite-shaped JSON
+  output (`{component, version, ok, regista, checks}`)
+- **`agent-wake install-harness <claude|opencode|all>`** — wires adapters
+  into harness configs idempotently (part of the suite bootstrap)
+- **Suite config** — reads `REGISTA_*` env vars from `suite.env` with the
+  standard precedence chain
+- **Packaging** — systemd unit, Docker container, and Windows Service
+
 ## Quick start
 
 ### 1. Install and start the daemon
