@@ -179,8 +179,17 @@ async def _run() -> int:
     reload_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop_event.set)
-    loop.add_signal_handler(signal.SIGHUP, reload_event.set)
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, AttributeError):
+            # Windows ProactorEventLoop doesn't support add_signal_handler.
+            # Fall back to signal.signal for SIGINT/SIGTERM.
+            signal.signal(sig, lambda s, f: stop_event.set())
+    try:
+        loop.add_signal_handler(signal.SIGHUP, reload_event.set)
+    except (NotImplementedError, AttributeError, OSError):
+        # SIGHUP doesn't exist on Windows; no-op.
+        pass
 
     while not stop_event.is_set():
         reload_event.clear()

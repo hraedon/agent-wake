@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +39,11 @@ _CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 _OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 _MANIFEST_PATH = Path.home() / ".config" / "agent-wake" / "install-manifest.json"
 
-# Sentinel to mark entries as agent-wake-owned (for safe uninstall)
-_SENTINEL = "# managed by agent-wake install-harness"
 
-# Env vars we set in harness configs
-_WAKE_ENV_VARS: dict[str, str] = {
-    "AGENT_WAKE_CONFIG": str(DEFAULT_CONFIG_PATH),
-}
+def _wake_env_vars() -> dict[str, str]:
+    """Build env vars lazily so AGENT_WAKE_CONFIG is resolved at call time."""
+    config_path = os.environ.get("AGENT_WAKE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    return {"AGENT_WAKE_CONFIG": config_path}
 
 
 # ── manifest ───────────────────────────────────────────────────────────────────
@@ -61,43 +60,86 @@ def _load_manifest() -> dict[str, Any]:
 
 
 def _save_manifest(manifest: dict[str, Any]) -> None:
-    _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _MANIFEST_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    _atomic_write_json(_MANIFEST_PATH, manifest)
 
 
-# ── JSON merge helpers ─────────────────────────────────────────────────────────
+# ── JSON helpers ───────────────────────────────────────────────────────────────
+
+
+class ConfigParseError(Exception):
+    """Raised when a harness config file exists but is not valid JSON."""
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    """Load JSON from *path*. Returns {} for missing files.
+
+    Raises ConfigParseError if the file exists but is not valid JSON
+    (prevents silent data loss from overwriting corrupted configs).
+    """
     if not path.exists():
         return {}
     try:
-        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigParseError(f"Cannot read {path}: {e}") from e
+    try:
+        data: dict[str, Any] = json.loads(text)
         return data
-    except (json.JSONDecodeError, OSError):
-        return {}
+    except json.JSONDecodeError as e:
+        raise ConfigParseError(
+            f"{path} is not valid JSON (line {e.lineno}): {e.msg}. "
+            "Fix the file before running install-harness."
+        ) from e
 
 
-def _save_json(path: Path, data: dict[str, Any]) -> None:
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write JSON to *path* (temp file + rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        json.dump(data, tmp, indent=2)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
 
 
-def _merge_env_block(config: dict[str, Any], env_vars: dict[str, str]) -> list[str]:
-    """Merge env vars into the config's 'env' block. Returns list of keys changed."""
-    env = config.setdefault("env", {})
+def _merge_env_block(config: dict[str, Any], env_vars: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Merge env vars into the config's 'env' block.
+
+    Returns ``(changed, skipped)`` where:
+    - ``changed``: keys that were created or updated
+    - ``skipped``: keys that had a different existing value (no-clobber)
+
+    Per contract rule 3: if a key already has a different value, keep the
+    existing value and warn (never silently overwrite user config).
+    """
+    if not isinstance(config.get("env"), dict):
+        if "env" not in config:
+            config["env"] = {}
+        else:
+            raise TypeError(f"config 'env' is {type(config['env']).__name__}, expected dict")
+    env = config["env"]
     changed: list[str] = []
+    skipped: list[str] = []
     for key, value in env_vars.items():
-        if key not in env or env[key] != value:
+        if key in env:
+            if env[key] != value:
+                skipped.append(f"env.{key} (existing: {env[key]})")
+                continue
+        else:
             env[key] = value
             changed.append(f"env.{key}")
-    return changed
+    return changed, skipped
 
 
 # ── claude wiring ──────────────────────────────────────────────────────────────
 
 
-def _wire_claude(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
+def _wire_claude(dry_run: bool, uninstall: bool, user: str | None) -> list[dict[str, Any]]:
     """Wire or unwire claude. Returns list of action dicts."""
     actions: list[dict[str, Any]] = []
     manifest = _load_manifest()
@@ -105,7 +147,6 @@ def _wire_claude(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
     if uninstall:
         return _unwire_claude(dry_run, manifest, actions)
 
-    # Check adapter is installed
     adapter_path = shutil.which("agent-wake-claude")
     if not adapter_path:
         actions.append({
@@ -115,8 +156,25 @@ def _wire_claude(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
         })
         return actions
 
-    config = _load_json(_CLAUDE_SETTINGS)
-    changed = _merge_env_block(config, _WAKE_ENV_VARS)
+    try:
+        config = _load_json(_CLAUDE_SETTINGS)
+    except ConfigParseError as e:
+        actions.append({"kind": "error", "path": str(_CLAUDE_SETTINGS), "detail": str(e)})
+        return actions
+
+    env_vars = _wake_env_vars()
+    if user:
+        env_vars["AGENT_WAKE_PRINCIPAL_ID"] = user
+
+    changed, skipped = _merge_env_block(config, env_vars)
+
+    if skipped:
+        actions.append({
+            "kind": "warn",
+            "path": str(_CLAUDE_SETTINGS),
+            "keys": skipped,
+            "detail": f"skipped (existing values differ): {', '.join(skipped)}",
+        })
 
     if changed:
         actions.append({
@@ -125,7 +183,7 @@ def _wire_claude(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
             "keys": changed,
             "detail": "set wake env vars in claude settings",
         })
-    else:
+    elif not skipped:
         actions.append({
             "kind": "noop",
             "path": str(_CLAUDE_SETTINGS),
@@ -133,40 +191,46 @@ def _wire_claude(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
             "detail": "env vars already set",
         })
 
-    # Document the launch flag (informational — channels use a CLI flag, not config)
     actions.append({
         "kind": "info",
-        "path": None,
+        "path": "",
         "keys": [],
         "detail": "launch claude with: --dangerously-load-development-channels server:agent-wake-claude",
     })
 
     if not dry_run and changed:
-        _save_json(_CLAUDE_SETTINGS, config)
+        _atomic_write_json(_CLAUDE_SETTINGS, config)
         manifest.setdefault("installed", {})["claude"] = {
             "settings_path": str(_CLAUDE_SETTINGS),
-            "env_keys": list(_WAKE_ENV_VARS.keys()),
+            "env_keys": [k.split(".", 1)[1] for k in changed if k.startswith("env.")],
         }
         _save_manifest(manifest)
 
     return actions
 
 
-def _unwire_claude(dry_run: bool, manifest: dict[str, Any], actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _unwire_claude(
+    dry_run: bool, manifest: dict[str, Any], actions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Remove agent-wake entries from claude settings."""
     entry = manifest.get("installed", {}).get("claude")
     if not entry:
         actions.append({"kind": "noop", "path": str(_CLAUDE_SETTINGS), "keys": [], "detail": "claude not wired by install-harness"})
         return actions
 
-    config = _load_json(_CLAUDE_SETTINGS)
+    try:
+        config = _load_json(_CLAUDE_SETTINGS)
+    except ConfigParseError as e:
+        actions.append({"kind": "error", "path": str(_CLAUDE_SETTINGS), "detail": str(e)})
+        return actions
+
     env = config.get("env", {})
     removed: list[str] = []
     for key in entry.get("env_keys", []):
         if key in env:
             del env[key]
             removed.append(f"env.{key}")
-    if not env:
+    if not env and "env" in config:
         del config["env"]
 
     if removed:
@@ -179,8 +243,9 @@ def _unwire_claude(dry_run: bool, manifest: dict[str, Any], actions: list[dict[s
     else:
         actions.append({"kind": "noop", "path": str(_CLAUDE_SETTINGS), "keys": [], "detail": "nothing to remove"})
 
+    if not dry_run and removed:
+        _atomic_write_json(_CLAUDE_SETTINGS, config)
     if not dry_run:
-        _save_json(_CLAUDE_SETTINGS, config)
         manifest.get("installed", {}).pop("claude", None)
         _save_manifest(manifest)
 
@@ -192,8 +257,9 @@ def _unwire_claude(dry_run: bool, manifest: dict[str, Any], actions: list[dict[s
 
 def _find_opencode_plugin_path() -> str | None:
     """Find the built opencode plugin dist/index.js."""
+    # parents[4] from daemon/src/agent_waked/cli/install_harness.py → repo root
     candidates = [
-        Path(__file__).resolve().parents[3] / "adapters" / "opencode" / "dist" / "index.js",
+        Path(__file__).resolve().parents[4] / "adapters" / "opencode" / "dist" / "index.js",
         Path.home() / ".local" / "share" / "agent-wake" / "opencode" / "dist" / "index.js",
     ]
     for c in candidates:
@@ -202,7 +268,7 @@ def _find_opencode_plugin_path() -> str | None:
     return None
 
 
-def _wire_opencode(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
+def _wire_opencode(dry_run: bool, uninstall: bool, user: str | None) -> list[dict[str, Any]]:
     """Wire or unwire opencode. Returns list of action dicts."""
     actions: list[dict[str, Any]] = []
     manifest = _load_manifest()
@@ -219,21 +285,42 @@ def _wire_opencode(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
         })
         return actions
 
-    config = _load_json(_OPENCODE_CONFIG)
+    try:
+        config = _load_json(_OPENCODE_CONFIG)
+    except ConfigParseError as e:
+        actions.append({"kind": "error", "path": str(_OPENCODE_CONFIG), "detail": str(e)})
+        return actions
 
-    # Merge env vars
-    changed = _merge_env_block(config, _WAKE_ENV_VARS)
+    env_vars = _wake_env_vars()
+    if user:
+        env_vars["AGENT_WAKE_PRINCIPAL_ID"] = user
+
+    changed, skipped = _merge_env_block(config, env_vars)
+
+    if skipped:
+        actions.append({
+            "kind": "warn",
+            "path": str(_OPENCODE_CONFIG),
+            "keys": skipped,
+            "detail": f"skipped (existing values differ): {', '.join(skipped)}",
+        })
 
     # Register plugin if not already present
-    plugins = config.setdefault("plugins", [])
-    plugin_entry = {"path": plugin_path, "type": "module"}
+    if not isinstance(config.get("plugins"), list):
+        if "plugins" not in config:
+            config["plugins"] = []
+        else:
+            raise TypeError(f"config 'plugins' is {type(config['plugins']).__name__}, expected list")
+    plugins = config["plugins"]
     already_present = any(
         isinstance(p, dict) and p.get("path") == plugin_path
         for p in plugins
     )
+    plugin_added = False
     if not already_present:
-        plugins.append(plugin_entry)
+        plugins.append({"path": plugin_path, "type": "module"})
         changed.append(f"plugins[{plugin_path}]")
+        plugin_added = True
 
     if changed:
         actions.append({
@@ -242,7 +329,7 @@ def _wire_opencode(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
             "keys": changed,
             "detail": "set wake env vars and register opencode plugin",
         })
-    else:
+    elif not skipped:
         actions.append({
             "kind": "noop",
             "path": str(_OPENCODE_CONFIG),
@@ -251,25 +338,34 @@ def _wire_opencode(dry_run: bool, uninstall: bool) -> list[dict[str, Any]]:
         })
 
     if not dry_run and changed:
-        _save_json(_OPENCODE_CONFIG, config)
-        manifest.setdefault("installed", {})["opencode"] = {
+        _atomic_write_json(_OPENCODE_CONFIG, config)
+        manifest_entry: dict[str, Any] = {
             "config_path": str(_OPENCODE_CONFIG),
-            "env_keys": list(_WAKE_ENV_VARS.keys()),
-            "plugin_path": plugin_path,
+            "env_keys": [k.split(".", 1)[1] for k in changed if k.startswith("env.")],
         }
+        if plugin_added:
+            manifest_entry["plugin_path"] = plugin_path
+        manifest.setdefault("installed", {})["opencode"] = manifest_entry
         _save_manifest(manifest)
 
     return actions
 
 
-def _unwire_opencode(dry_run: bool, manifest: dict[str, Any], actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _unwire_opencode(
+    dry_run: bool, manifest: dict[str, Any], actions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Remove agent-wake entries from opencode config."""
     entry = manifest.get("installed", {}).get("opencode")
     if not entry:
         actions.append({"kind": "noop", "path": str(_OPENCODE_CONFIG), "keys": [], "detail": "opencode not wired by install-harness"})
         return actions
 
-    config = _load_json(_OPENCODE_CONFIG)
+    try:
+        config = _load_json(_OPENCODE_CONFIG)
+    except ConfigParseError as e:
+        actions.append({"kind": "error", "path": str(_OPENCODE_CONFIG), "detail": str(e)})
+        return actions
+
     removed: list[str] = []
 
     # Remove env vars
@@ -283,14 +379,15 @@ def _unwire_opencode(dry_run: bool, manifest: dict[str, Any], actions: list[dict
 
     # Remove plugin
     plugin_path = entry.get("plugin_path")
-    if plugin_path:
+    if plugin_path and "plugins" in config:
         plugins = config.get("plugins", [])
-        new_plugins = [p for p in plugins if not (isinstance(p, dict) and p.get("path") == plugin_path)]
-        if len(new_plugins) < len(plugins):
-            config["plugins"] = new_plugins
-            removed.append(f"plugins[{plugin_path}]")
-        if not config["plugins"]:
-            del config["plugins"]
+        if isinstance(plugins, list):
+            new_plugins = [p for p in plugins if not (isinstance(p, dict) and p.get("path") == plugin_path)]
+            if len(new_plugins) < len(plugins):
+                config["plugins"] = new_plugins
+                removed.append(f"plugins[{plugin_path}]")
+            if not config["plugins"]:
+                del config["plugins"]
 
     if removed:
         actions.append({
@@ -302,8 +399,9 @@ def _unwire_opencode(dry_run: bool, manifest: dict[str, Any], actions: list[dict
     else:
         actions.append({"kind": "noop", "path": str(_OPENCODE_CONFIG), "keys": [], "detail": "nothing to remove"})
 
+    if not dry_run and removed:
+        _atomic_write_json(_OPENCODE_CONFIG, config)
     if not dry_run:
-        _save_json(_OPENCODE_CONFIG, config)
         manifest.get("installed", {}).pop("opencode", None)
         _save_manifest(manifest)
 
@@ -326,11 +424,12 @@ def _run_install(harness: str, dry_run: bool, uninstall: bool, user: str | None)
 
     for target in targets:
         if target == "claude":
-            actions = _wire_claude(dry_run, uninstall)
+            actions = _wire_claude(dry_run, uninstall, user)
         elif target == "opencode":
-            actions = _wire_opencode(dry_run, uninstall)
+            actions = _wire_opencode(dry_run, uninstall, user)
         else:
-            all_actions.append({"kind": "error", "path": None, "keys": [], "detail": f"unknown harness: {target}"})
+            all_actions.append({"kind": "error", "path": "", "detail": f"unknown harness: {target}"})
+            no_op = False
             continue
         all_actions.extend(actions)
         if any(a["kind"] not in ("noop", "info") for a in actions):
@@ -355,7 +454,7 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         print(json.dumps(result, indent=2))
-        return 2  # per contract: --dry-run exits 2
+        return 2
 
     # Human-readable summary
     for action in result["actions"]:
@@ -364,16 +463,16 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
         detail = action.get("detail", "")
         print(f"  {kind:12} {path}: {detail}")
 
+    has_error = any(a["kind"] in ("error", "check_failed") for a in result["actions"])
+    if has_error:
+        print("Install failed — see errors above.")
+        return 1
     if result["no_op"]:
         print("Already installed — no changes needed.")
     elif args.uninstall:
         print("Uninstall complete.")
     else:
         print("Install complete.")
-
-    # Exit 0 for success (including idempotent no-op), 1 if any check_failed
-    if any(a["kind"] == "check_failed" for a in result["actions"]):
-        return 1
     return 0
 
 
@@ -399,6 +498,6 @@ def _build_install_harness_parser(sub: argparse._SubParsersAction[argparse.Argum
     )
     p.add_argument(
         "--user",
-        help="Per-user wiring (principal_id); system-level when omitted",
+        help="Per-user wiring (writes principal_id into harness env block)",
     )
     p.set_defaults(func=_cmd_install_harness)

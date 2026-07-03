@@ -29,7 +29,7 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 COPY README.md ./
 
-RUN pip install --no-cache-dir . && \
+RUN pip install --no-cache-dir ".[vault]" && \
     pip cache purge
 
 USER agentwake

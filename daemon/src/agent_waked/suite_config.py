@@ -78,6 +78,8 @@ def _parse_env_file(path: Path) -> dict[str, str]:
             continue
         key, _, value = stripped.partition("=")
         key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
         value = value.strip()
         if not key:
             continue

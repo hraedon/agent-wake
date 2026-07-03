@@ -1,7 +1,7 @@
 # agent-waked Windows Service wrapper
 #
 # Per Plan 004 WI-4.1 and blueprint §3 (Windows Service for native Windows deployment).
-# Requires pywin32:  pip install pywin32
+# Requires pywin32:  pip install -e ".[windows]"
 #
 # Install:
 #   python daemon/windows_service.py install
@@ -11,14 +11,15 @@
 #   python daemon/windows_service.py stop
 #   python daemon/windows_service.py remove
 #
-# The service reads config from %USERPROFILE%\.config\agent-wake\config.json
+# The service reads config from %ProgramData%\agent-wake\config.json by default
 # (or AGENT_WAKE_CONFIG env var). Suite.env is read from
 # %ProgramData%\agent-suite\suite.env (system) or
 # %USERPROFILE%\.config\agent-suite\suite.env (per-user).
 
-import sys
 import os
+import sys
 import logging
+from pathlib import Path
 
 try:
     import win32serviceutil
@@ -26,10 +27,8 @@ try:
     import win32event
     import servicemanager
 except ImportError:
-    print("pywin32 is required: pip install pywin32", file=sys.stderr)
+    print("pywin32 is required: pip install -e '.[windows]'", file=sys.stderr)
     sys.exit(1)
-
-from agent_waked.main import _run
 
 
 class AgentWakedService(win32serviceutil.ServiceFramework):
@@ -44,11 +43,12 @@ class AgentWakedService(win32serviceutil.ServiceFramework):
         super().__init__(args)
         self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
         self._stop_event = None
+
+        # Ensure log directory exists before configuring logging
+        log_dir = Path(os.environ.get("ProgramData", "C:\\ProgramData")) / "agent-wake"
+        log_dir.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(
-            filename=os.path.join(
-                os.environ.get("ProgramData", "C:\\ProgramData"),
-                "agent-wake", "agent-waked-service.log",
-            ),
+            filename=str(log_dir / "agent-waked-service.log"),
             level=logging.INFO,
             format="%(asctime)s %(name)s %(levelname)s %(message)s",
         )
@@ -72,6 +72,7 @@ class AgentWakedService(win32serviceutil.ServiceFramework):
             asyncio.run(self._run_service())
         except Exception as e:
             logging.exception("service error: %s", e)
+            self.ReportServiceStatus(win32service.SERVICE_STOPPED)
 
     async def _run_service(self):
         from agent_waked.main import _run

@@ -151,3 +151,15 @@ def test_is_suite_configured(tmp_path, monkeypatch):
 
     _write_env_file(tmp_path / "user.env", ["REGISTA_DSN=x"])
     assert is_suite_configured()
+
+
+def test_parse_env_file_export_prefix(tmp_path):
+    """Lines with 'export' prefix should be parsed correctly."""
+    f = tmp_path / "suite.env"
+    _write_env_file(f, [
+        "export REGISTA_DSN=postgresql://user@host/db",
+        "export AGENT_WAKE_PROJECT=my-project",
+    ])
+    result = _parse_env_file(f)
+    assert result["REGISTA_DSN"] == "postgresql://user@host/db"
+    assert result["AGENT_WAKE_PROJECT"] == "my-project"

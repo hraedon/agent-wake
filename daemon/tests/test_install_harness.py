@@ -48,7 +48,7 @@ def isolated_home(tmp_path, monkeypatch):
 
 def test_claude_install_sets_env_vars(isolated_home):
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
-        actions = _wire_claude(dry_run=False, uninstall=False)
+        actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "merge_json" for a in actions)
     config = json.loads(isolated_home.claude.read_text())
@@ -59,8 +59,8 @@ def test_claude_install_sets_env_vars(isolated_home):
 def test_claude_install_idempotent(isolated_home):
     """Re-running install-harness on already-wired config is a no-op."""
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
-        _wire_claude(dry_run=False, uninstall=False)
-        actions = _wire_claude(dry_run=False, uninstall=False)
+        _wire_claude(dry_run=False, uninstall=False, user=None)
+        actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
     # Second run should be a noop for env vars
     noop_actions = [a for a in actions if a["kind"] == "noop"]
@@ -70,14 +70,14 @@ def test_claude_install_idempotent(isolated_home):
 
 def test_claude_install_missing_adapter(isolated_home):
     with patch("agent_waked.cli.install_harness.shutil.which", return_value=None):
-        actions = _wire_claude(dry_run=False, uninstall=False)
+        actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "check_failed" for a in actions)
 
 
 def test_claude_install_dry_run_does_not_write(isolated_home):
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
-        actions = _wire_claude(dry_run=True, uninstall=False)
+        actions = _wire_claude(dry_run=True, uninstall=False, user=None)
 
     assert not isolated_home.claude.exists()
     assert not isolated_home.manifest.exists()
@@ -85,8 +85,8 @@ def test_claude_install_dry_run_does_not_write(isolated_home):
 
 def test_claude_uninstall_removes_env_vars(isolated_home):
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
-        _wire_claude(dry_run=False, uninstall=False)
-        actions = _wire_claude(dry_run=False, uninstall=True)
+        _wire_claude(dry_run=False, uninstall=False, user=None)
+        actions = _wire_claude(dry_run=False, uninstall=True, user=None)
 
     assert any(a["kind"] == "remove_keys" for a in actions)
     if isolated_home.claude.exists():
@@ -96,7 +96,7 @@ def test_claude_uninstall_removes_env_vars(isolated_home):
 
 def test_claude_uninstall_idempotent(isolated_home):
     """Uninstalling on a clean profile is a no-op, not an error."""
-    actions = _wire_claude(dry_run=False, uninstall=True)
+    actions = _wire_claude(dry_run=False, uninstall=True, user=None)
     assert all(a["kind"] == "noop" for a in actions)
 
 
@@ -108,7 +108,7 @@ def test_claude_install_preserves_existing_config(isolated_home):
     })
 
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
-        _wire_claude(dry_run=False, uninstall=False)
+        _wire_claude(dry_run=False, uninstall=False, user=None)
 
     config = json.loads(isolated_home.claude.read_text())
     assert config["env"]["MY_CUSTOM_VAR"] == "value"
@@ -126,7 +126,7 @@ def test_opencode_install_registers_plugin(isolated_home, tmp_path):
     fake_dist.touch()
 
     with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
-        actions = _wire_opencode(dry_run=False, uninstall=False)
+        actions = _wire_opencode(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "merge_json" for a in actions)
     config = json.loads(isolated_home.opencode.read_text())
@@ -141,8 +141,8 @@ def test_opencode_install_idempotent(isolated_home, tmp_path):
     fake_dist.touch()
 
     with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
-        _wire_opencode(dry_run=False, uninstall=False)
-        actions = _wire_opencode(dry_run=False, uninstall=False)
+        _wire_opencode(dry_run=False, uninstall=False, user=None)
+        actions = _wire_opencode(dry_run=False, uninstall=False, user=None)
 
     noop_actions = [a for a in actions if a["kind"] == "noop"]
     assert len(noop_actions) >= 1
@@ -151,7 +151,7 @@ def test_opencode_install_idempotent(isolated_home, tmp_path):
 
 def test_opencode_install_missing_plugin(isolated_home):
     with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=None):
-        actions = _wire_opencode(dry_run=False, uninstall=False)
+        actions = _wire_opencode(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "check_failed" for a in actions)
 
@@ -162,8 +162,8 @@ def test_opencode_uninstall_removes_plugin(isolated_home, tmp_path):
     fake_dist.touch()
 
     with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
-        _wire_opencode(dry_run=False, uninstall=False)
-        actions = _wire_opencode(dry_run=False, uninstall=True)
+        _wire_opencode(dry_run=False, uninstall=False, user=None)
+        actions = _wire_opencode(dry_run=False, uninstall=True, user=None)
 
     assert any(a["kind"] == "remove_keys" for a in actions)
     if isolated_home.opencode.exists():
@@ -184,7 +184,7 @@ def test_opencode_install_preserves_existing_config(isolated_home, tmp_path):
     fake_dist.touch()
 
     with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
-        _wire_opencode(dry_run=False, uninstall=False)
+        _wire_opencode(dry_run=False, uninstall=False, user=None)
 
     config = json.loads(isolated_home.opencode.read_text())
     assert config["env"]["EXISTING_VAR"] == "val"
@@ -222,3 +222,57 @@ def test_run_install_dry_run_returns_actions(isolated_home):
 def test_run_install_unknown_harness(isolated_home):
     result = _run_install("gemini", dry_run=False, uninstall=False, user=None)
     assert any(a["kind"] == "error" for a in result["actions"])
+
+
+# ── no-clobber / --user / corrupted JSON ───────────────────────────────────────
+
+
+def test_claude_install_no_clobber_existing_value(isolated_home):
+    """Existing AGENT_WAKE_CONFIG with a different value should be preserved."""
+    _write_json(isolated_home.claude, {
+        "env": {"AGENT_WAKE_CONFIG": "/custom/path/config.json"},
+    })
+    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+        actions = _wire_claude(dry_run=False, uninstall=False, user=None)
+
+    config = json.loads(isolated_home.claude.read_text())
+    # Existing value should be preserved
+    assert config["env"]["AGENT_WAKE_CONFIG"] == "/custom/path/config.json"
+    # Should have a warn action
+    assert any(a["kind"] == "warn" for a in actions)
+
+
+def test_claude_install_with_user_writes_principal_id(isolated_home):
+    """--user should write AGENT_WAKE_PRINCIPAL_ID to the env block."""
+    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+        _wire_claude(dry_run=False, uninstall=False, user="alice@example.com")
+
+    config = json.loads(isolated_home.claude.read_text())
+    assert config["env"]["AGENT_WAKE_PRINCIPAL_ID"] == "alice@example.com"
+
+
+def test_claude_install_corrupted_json_errors(isolated_home):
+    """Corrupted settings.json should produce an error, not silent overwrite."""
+    isolated_home.claude.parent.mkdir(parents=True, exist_ok=True)
+    isolated_home.claude.write_text("{invalid json", encoding="utf-8")
+
+    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+        actions = _wire_claude(dry_run=False, uninstall=False, user=None)
+
+    assert any(a["kind"] == "error" for a in actions)
+    # Original corrupted content should be preserved, not overwritten
+    assert isolated_home.claude.read_text() == "{invalid json"
+
+
+def test_claude_uninstall_missing_env_block_no_crash(isolated_home):
+    """Uninstall should not crash if env block was manually removed."""
+    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+        _wire_claude(dry_run=False, uninstall=False, user=None)
+        # Manually remove env block
+        config = json.loads(isolated_home.claude.read_text())
+        del config["env"]
+        _write_json(isolated_home.claude, config)
+        # Uninstall should not crash
+        actions = _wire_claude(dry_run=False, uninstall=True, user=None)
+
+    assert all(a["kind"] != "error" for a in actions)

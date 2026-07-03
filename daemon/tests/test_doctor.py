@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from agent_waked.doctor import run_checks, format_text, main
+from agent_waked.doctor import run_checks, format_text
 
 
 def _write_config(path: Path, data: dict) -> None:
@@ -75,7 +75,7 @@ def test_doctor_checks_all_present(cfg_with_secret):
 def test_doctor_check_has_status_and_detail(cfg_with_secret):
     report = run_checks()
     for check in report["checks"]:
-        assert check["status"] in ("pass", "fail", "warn", "skip")
+        assert check["status"] in ("ok", "fail", "warn", "skip")
         assert isinstance(check["detail"], str)
 
 
@@ -85,7 +85,7 @@ def test_doctor_check_has_status_and_detail(cfg_with_secret):
 def test_config_present_pass(cfg_with_secret):
     report = run_checks()
     config_check = next(c for c in report["checks"] if c["name"] == "config_present")
-    assert config_check["status"] == "pass"
+    assert config_check["status"] == "ok"
 
 
 def test_config_present_fail_when_missing(tmp_path, monkeypatch):
@@ -109,7 +109,7 @@ def test_config_present_fail_when_missing(tmp_path, monkeypatch):
 def test_auth_configured_pass(cfg_with_secret):
     report = run_checks()
     auth_check = next(c for c in report["checks"] if c["name"] == "auth_configured")
-    assert auth_check["status"] == "pass"
+    assert auth_check["status"] == "ok"
 
 
 def test_auth_configured_fail_when_no_sources(tmp_path, monkeypatch):
@@ -128,7 +128,7 @@ def test_auth_configured_fail_when_no_sources(tmp_path, monkeypatch):
     # Config with sources should pass auth check
     report = run_checks()
     auth_check = next(c for c in report["checks"] if c["name"] == "auth_configured")
-    assert auth_check["status"] == "pass"
+    assert auth_check["status"] == "ok"
 
 
 # ── ok/degraded logic ──────────────────────────────────────────────────────────
