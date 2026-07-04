@@ -256,7 +256,25 @@ def _unwire_claude(
 
 
 def _find_opencode_plugin_path() -> str | None:
-    """Find the built opencode plugin dist/index.js."""
+    """Find the built opencode plugin dist/index.js.
+
+    Resolution order:
+    1. ``$AGENT_WAKE_OPENCODE_PLUGIN`` (explicit operator override; useful for
+       pip-installed daemon installs that have no source tree on disk). Must
+       point at an existing ``.js`` file — directories and other file types
+       are rejected so a stale or hostile value can't steer the installer at
+       an arbitrary location.
+    2. The daemon's sibling source-tree path
+       (``<repo>/adapters/opencode/dist/index.js``).
+    3. The shared install location
+       (``~/.local/share/agent-wake/opencode/dist/index.js``).
+    """
+    env_override = os.environ.get("AGENT_WAKE_OPENCODE_PLUGIN")
+    if env_override:
+        p = Path(env_override).expanduser()
+        if p.is_file() and p.suffix == ".js":
+            return str(p)
+        return None
     # parents[4] from daemon/src/agent_waked/cli/install_harness.py → repo root
     candidates = [
         Path(__file__).resolve().parents[4] / "adapters" / "opencode" / "dist" / "index.js",

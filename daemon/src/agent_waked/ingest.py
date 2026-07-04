@@ -37,6 +37,21 @@ class SourceMismatchError(ValueError):
         self.body_source = body_source
 
 
+class UnsupportedVersionError(ValueError):
+    """Raised when the body carries an unknown ``v`` field (schema violation).
+
+    Per the wake-event schema, an envelope with ``v`` set must be a known
+    version. Silently wrapping it as a v0 webhook (the prior behaviour) was a
+    correctness bug (BC-010): a sender that upgrades to a newer envelope
+    version would have its events silently misinterpreted instead of rejected
+    with an explicit error. Carries the offending version for logging.
+    """
+
+    def __init__(self, version: object):
+        super().__init__(f"unsupported wake event version: {version!r}")
+        self.version = version
+
+
 class Dedupe:
     """In-memory 4096-id FIFO dedupe window."""
 
@@ -65,18 +80,31 @@ def _build_wake_event(body: bytes, source: str, event_id: str | None) -> dict[st
     except json.JSONDecodeError:
         payload = None
 
-    if isinstance(payload, dict) and payload.get("v") == 0 and "event_id" in payload:
-        claimed_source = payload.get("source")
-        if claimed_source is not None and claimed_source != source:
-            raise SourceMismatchError(source, str(claimed_source))
-        if "source" not in payload:
-            payload["source"] = source
-        # Ensure minimum viable event structure
-        payload.setdefault("kind", "webhook")
-        payload.setdefault("content", "")
-        payload.setdefault("meta", {})
-        payload.setdefault("wake", True)
-        return payload
+    if isinstance(payload, dict):
+        # Known-version check (BC-010): an envelope that declares a ``v`` we
+        # don't understand MUST be rejected, never silently re-wrapped —
+        # regardless of whether the rest of the envelope is complete. Without
+        # this guard, a sender upgrading to v1 with an incomplete body would
+        # have its declared version silently discarded and the body
+        # misinterpreted as an opaque webhook.
+        version = payload.get("v", 0)
+        # Strict type + value check: bool is a subclass of int in Python
+        # (``False == 0``), so an explicit bool exclusion keeps ``v: false``
+        # and floats (``v: 0.0``) from sneaking through as v0.
+        if not isinstance(version, int) or isinstance(version, bool) or version != 0:
+            raise UnsupportedVersionError(version)
+        if "event_id" in payload:
+            claimed_source = payload.get("source")
+            if claimed_source is not None and claimed_source != source:
+                raise SourceMismatchError(source, str(claimed_source))
+            if "source" not in payload:
+                payload["source"] = source
+            # Ensure minimum viable event structure
+            payload.setdefault("kind", "webhook")
+            payload.setdefault("content", "")
+            payload.setdefault("meta", {})
+            payload.setdefault("wake", True)
+            return payload
 
     return {
         "v": 0,
@@ -159,6 +187,14 @@ def create_ingest_app(
                 e.body_source,
             )
             return _json_response(403, {"error": "unknown source or invalid signature"})
+        except UnsupportedVersionError as e:
+            log.warning(
+                "rejected event with unsupported version %r source=%s",
+                e.version,
+                source,
+            )
+            # 400 is the correct client-error code; do not echo the value.
+            return _json_response(400, {"error": "unsupported wake event version"})
 
         event_id = event["event_id"]
 

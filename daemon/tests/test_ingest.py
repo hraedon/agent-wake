@@ -123,6 +123,77 @@ async def test_post_wrapped_payload(client, router):
     assert ev["meta"] == {}
 
 
+@pytest.mark.asyncio
+async def test_unknown_version_event_rejected(client, router):
+    """BC-010: an envelope with event_id but unknown `v` MUST be rejected (400)."""
+    body = json.dumps({
+        "v": 1, "event_id": "evt-v1", "source": "test",
+        "kind": "alert", "content": "future", "meta": {}, "wake": True,
+    }).encode()
+    resp = await _make_request(client, body)
+    assert resp.status == 400
+    data = await resp.json()
+    assert "unsupported" in data["error"]
+    assert len(router.delivered) == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_version_without_event_id_rejected(client, router):
+    """BC-010: unknown `v` MUST be rejected even without event_id (no silent wrap)."""
+    body = json.dumps({"v": 1, "source": "test", "content": "future"}).encode()
+    resp = await _make_request(client, body)
+    assert resp.status == 400
+    assert len(router.delivered) == 0
+
+
+@pytest.mark.asyncio
+async def test_version_false_rejected(client, router):
+    """BC-010: ``v: false`` is not a valid version (bool sneaks past ``== 0``)."""
+    body = json.dumps({
+        "v": False, "event_id": "evt-vbool", "source": "test",
+        "kind": "alert", "content": "x", "meta": {}, "wake": True,
+    }).encode()
+    resp = await _make_request(client, body)
+    assert resp.status == 400
+    assert len(router.delivered) == 0
+
+
+@pytest.mark.asyncio
+async def test_version_float_rejected(client, router):
+    """BC-010: ``v: 0.0`` is not a valid version (float sneaks past ``== 0``)."""
+    body = json.dumps({
+        "v": 0.0, "event_id": "evt-vfloat", "source": "test",
+        "kind": "alert", "content": "x", "meta": {}, "wake": True,
+    }).encode()
+    resp = await _make_request(client, body)
+    assert resp.status == 400
+    assert len(router.delivered) == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_version_event_string_rejected(client, router):
+    """BC-010: non-integer `v` is also rejected, not wrapped."""
+    body = json.dumps({
+        "v": "next", "event_id": "evt-vstr", "source": "test",
+        "kind": "alert", "content": "future", "meta": {}, "wake": True,
+    }).encode()
+    resp = await _make_request(client, body)
+    assert resp.status == 400
+    assert len(router.delivered) == 0
+
+
+@pytest.mark.asyncio
+async def test_envelope_without_v_still_accepted(client, router):
+    """A bare event_id payload without `v` is treated as v0 (forward-compat wrap path)."""
+    body = json.dumps({
+        "event_id": "evt-nov", "source": "test",
+        "kind": "alert", "content": "hi", "meta": {}, "wake": True,
+    }).encode()
+    resp = await _make_request(client, body)
+    assert resp.status == 202
+    assert len(router.delivered) == 1
+
+
 # ── 403 unknown source ───────────────────────────────────────────────
 
 @pytest.mark.asyncio

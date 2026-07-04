@@ -67,9 +67,15 @@ def _check_ingress_reachable() -> tuple[str, str]:
     except Exception:
         return "skip", "config not loadable; cannot probe ingress"
 
-    listen = cfg.get("listen", {})
-    host = listen.get("host", "127.0.0.1")
-    port = listen.get("port", 8788)
+    # Honor AGENT_WAKE_LISTEN_HOST / AGENT_WAKE_LISTEN_PORT so doctor probes
+    # the same address the daemon actually binds (the daemon reads these env
+    # overrides in main.resolve_listen).
+    from .main import resolve_listen
+    try:
+        host, port = resolve_listen(cfg)
+    except Exception:
+        host = cfg.get("listen", {}).get("host", "127.0.0.1")
+        port = cfg.get("listen", {}).get("port", 8788)
 
     try:
         with socket.create_connection((host, port), timeout=2.0):
@@ -116,20 +122,42 @@ def _check_auth_configured() -> tuple[str, str]:
 
 
 def _check_adapters_installed() -> tuple[str, str]:
-    """Check: at least one adapter is installed (on PATH)."""
-    claude = shutil.which("agent-wake-claude") is not None
-    opencode = shutil.which("bun") is not None
+    """Check: at least one adapter is actually installed and ready.
 
+    Precise checks (not just "bun on PATH"):
+    - claude: ``agent-wake-claude`` console script on PATH.
+    - opencode: the opencode plugin's ``dist/index.js`` exists at one of the
+      candidate paths the installer probes. ``bun`` being on PATH is not enough
+      — the plugin must actually be built.
+    """
     installed: list[str] = []
-    if claude:
+    if shutil.which("agent-wake-claude") is not None:
         installed.append("claude")
-    if opencode:
-        installed.append("opencode(bun)")
+
+    opencode_plugin = _find_opencode_plugin()
+    if opencode_plugin is not None:
+        # Report presence without echoing the full filesystem path (avoid
+        # leaking host layout in shared doctor output).
+        installed.append("opencode")
 
     if not installed:
-        return "warn", "no adapters installed (install agent-wake-claude or the opencode plugin)"
+        return (
+            "warn",
+            "no adapters installed (install agent-wake-claude or build the "
+            "opencode plugin: cd adapters/opencode && bun install && bun run build)",
+        )
 
     return "ok", f"adapters found: {', '.join(installed)}"
+
+
+def _find_opencode_plugin() -> str | None:
+    """Mirror install_harness's plugin path probe so the doctor check is precise."""
+    try:
+        from .cli.install_harness import _find_opencode_plugin_path
+        path = _find_opencode_plugin_path()
+        return path if path else None
+    except Exception:
+        return None
 
 
 def _check_allowlist_present() -> tuple[str, str]:

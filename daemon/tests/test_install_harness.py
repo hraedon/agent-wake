@@ -156,6 +156,45 @@ def test_opencode_install_missing_plugin(isolated_home):
     assert any(a["kind"] == "check_failed" for a in actions)
 
 
+def test_opencode_plugin_env_override(isolated_home, tmp_path, monkeypatch):
+    """AGENT_WAKE_OPENCODE_PLUGIN points the installer at an arbitrary plugin path."""
+    fake_dist = tmp_path / "custom" / "index.js"
+    fake_dist.parent.mkdir(parents=True)
+    fake_dist.touch()
+    monkeypatch.setenv("AGENT_WAKE_OPENCODE_PLUGIN", str(fake_dist))
+
+    from agent_waked.cli.install_harness import _find_opencode_plugin_path
+    assert _find_opencode_plugin_path() == str(fake_dist)
+
+
+def test_opencode_plugin_env_override_missing_returns_none(tmp_path, monkeypatch):
+    """A non-existent env override path returns None (not an error)."""
+    monkeypatch.setenv("AGENT_WAKE_OPENCODE_PLUGIN", str(tmp_path / "nope.js"))
+
+    from agent_waked.cli.install_harness import _find_opencode_plugin_path
+    assert _find_opencode_plugin_path() is None
+
+
+def test_opencode_plugin_env_override_directory_rejected(tmp_path, monkeypatch):
+    """A directory or non-.js file is rejected (no arbitrary path steering)."""
+    fake_dir = tmp_path / "custom"
+    fake_dir.mkdir()
+    monkeypatch.setenv("AGENT_WAKE_OPENCODE_PLUGIN", str(fake_dir))
+
+    from agent_waked.cli.install_harness import _find_opencode_plugin_path
+    assert _find_opencode_plugin_path() is None
+
+
+def test_opencode_plugin_env_override_non_js_rejected(tmp_path, monkeypatch):
+    """A non-.js file is rejected even if it exists."""
+    fake_txt = tmp_path / "index.txt"
+    fake_txt.touch()
+    monkeypatch.setenv("AGENT_WAKE_OPENCODE_PLUGIN", str(fake_txt))
+
+    from agent_waked.cli.install_harness import _find_opencode_plugin_path
+    assert _find_opencode_plugin_path() is None
+
+
 def test_opencode_uninstall_removes_plugin(isolated_home, tmp_path):
     fake_dist = tmp_path / "dist" / "index.js"
     fake_dist.parent.mkdir(parents=True)

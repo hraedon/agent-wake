@@ -12,6 +12,13 @@
 #           -e AGENT_WAKE_LOG_FORMAT=json \
 #           agent-waked
 #
+# The daemon binds 0.0.0.0 *inside* the container so the published host port
+# can reach it; map to a loopback host port (-p 127.0.0.1:8788:8788) to keep
+# the ingress off the host's network interfaces. Per BC-002 the daemon logs a
+# warning on non-loopback binds; AGENT_WAKE_LISTEN_HOST=0.0.0.0 (set below)
+# marks the bind as operator-intentional and downgrades the security ERROR to
+# a WARNING.
+#
 # For Vault-backed sources, mount the AppRole secret_id file and set VAULT_*.
 
 FROM python:3.12-slim
@@ -34,6 +41,10 @@ RUN pip install --no-cache-dir ".[vault]" && \
 
 USER agentwake
 
+# Bind 0.0.0.0 inside the container so the published host port can reach the
+# daemon; rely on the host-side port mapping (-p 127.0.0.1:8788:8788) for
+# network isolation. Set in config.json's listen.host if you prefer.
+ENV AGENT_WAKE_LISTEN_HOST=0.0.0.0
 ENV AGENT_WAKE_CONFIG=/config/config.json
 ENV AGENT_WAKE_LOG_FORMAT=json
 ENV PYTHONUNBUFFERED=1

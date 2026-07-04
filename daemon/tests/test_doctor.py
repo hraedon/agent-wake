@@ -170,6 +170,43 @@ def test_format_text_includes_result(cfg_with_secret):
     assert "Result:" in text
 
 
+# ── adapters_installed precision ──────────────────────────────────────────────
+
+
+def test_adapters_installed_finds_claude(cfg_with_secret):
+    """When agent-wake-claude is on PATH and no opencode plugin exists, claude is reported."""
+    from agent_waked.doctor import _check_adapters_installed
+    with patch("agent_waked.doctor.shutil.which", return_value="/fake/agent-wake-claude"), \
+         patch("agent_waked.doctor._find_opencode_plugin", return_value=None):
+        status, detail = _check_adapters_installed()
+    assert status == "ok"
+    assert "claude" in detail
+    # Full opencode plugin path must not leak into doctor detail.
+    assert "opencode" not in detail or "opencode(" not in detail
+
+
+def test_adapters_installed_warns_when_none(cfg_with_secret):
+    """No claude binary and no built opencode plugin → warn."""
+    from agent_waked.doctor import _check_adapters_installed
+    with patch("agent_waked.doctor.shutil.which", return_value=None), \
+         patch("agent_waked.doctor._find_opencode_plugin", return_value=None):
+        status, detail = _check_adapters_installed()
+    assert status == "warn"
+    assert "no adapters" in detail
+
+
+def test_adapters_installed_finds_opencode(cfg_with_secret):
+    """Built opencode plugin is detected (without leaking the path)."""
+    from agent_waked.doctor import _check_adapters_installed
+    with patch("agent_waked.doctor.shutil.which", return_value=None), \
+         patch("agent_waked.doctor._find_opencode_plugin", return_value="/some/path/index.js"):
+        status, detail = _check_adapters_installed()
+    assert status == "ok"
+    assert "opencode" in detail
+    # The full filesystem path should not appear in the doctor output.
+    assert "/some/path/index.js" not in detail
+
+
 # ── main / CLI ─────────────────────────────────────────────────────────────────
 
 
