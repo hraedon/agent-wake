@@ -64,7 +64,28 @@ def load_config() -> dict[str, Any]:
         raise ConfigError(f"Config file not found: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+        try:
+            raw = json.load(f)
+        except json.JSONDecodeError as e:
+            # Do not chain the original exception: JSONDecodeError retains
+            # the full document text in .doc, which may carry secrets or
+            # sensitive metadata. Surface only line/msg.
+            raise ConfigError(
+                f"Config file {path} is not valid JSON near line {e.lineno}: {e.msg}"
+            )
+
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"Config file {path} must be a JSON object (got {type(raw).__name__})."
+        )
+
+    for nested_field in ("sources", "routing"):
+        nested = raw.get(nested_field)
+        if nested is not None and not isinstance(nested, dict):
+            raise ConfigError(
+                f"Config file {path}: '{nested_field}' must be an object "
+                f"(got {type(nested).__name__})."
+            )
 
     version = raw.get("version", 0)
     if version not in (0, 1):

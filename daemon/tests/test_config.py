@@ -241,3 +241,58 @@ def test_vault_block_bad_method_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
     with pytest.raises(ConfigError, match="approle"):
         load_config()
+
+
+# ── BC-013: malformed config surfaces ConfigError, not a traceback ───────────
+
+
+def test_malformed_json_raises_config_error(tmp_path, monkeypatch):
+    """BC-013: invalid JSON must raise ConfigError, not a raw JSONDecodeError."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("{not valid json")
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="not valid JSON"):
+        load_config()
+
+
+def test_non_object_json_raises_config_error(tmp_path, monkeypatch):
+    """A JSON document that isn't an object (e.g. a list) raises ConfigError
+    instead of an AttributeError on ``raw.get``."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("[1, 2, 3]")
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="must be a JSON object"):
+        load_config()
+
+
+def test_scalar_json_raises_config_error(tmp_path, monkeypatch):
+    """A bare scalar JSON value is also rejected cleanly."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text('"just a string"')
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="must be a JSON object"):
+        load_config()
+
+
+def test_sources_not_object_raises_config_error(tmp_path, monkeypatch):
+    """BC-013 hardening: 'sources' must be an object; a list must not crash
+    with an AttributeError on .items()."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_config(cfg_path, {"version": 1, "sources": ["not", "an", "object"]})
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="'sources' must be an object"):
+        load_config()
+
+
+def test_routing_not_object_raises_config_error(tmp_path, monkeypatch):
+    """BC-013 hardening: 'routing' must be an object when present."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_config(cfg_path, {"version": 1, "routing": "oops", "sources": {}})
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="'routing' must be an object"):
+        load_config()

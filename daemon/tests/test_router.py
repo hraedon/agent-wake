@@ -191,3 +191,88 @@ class TestDeliver:
 
         result = await r.deliver({"source": "github-actions", "event_id": "e6"})
         assert result == "no_subscriber"
+
+    # ── BC-009: deliver must not propagate ConnectionError ─────────
+
+    async def test_deliver_returns_no_subscriber_on_connection_reset(self):
+        """BC-009: a dead subscriber is evicted; deliver returns no_subscriber
+        instead of letting ConnectionResetError reach the HTTP handler (500)."""
+        r = Router(_config_legacy())
+
+        class DeadConn:
+            def __init__(self):
+                self.session_id = "s1"
+                self.adapter = "claude"
+                self.instance = "test"
+                self.sources = ["github-actions"]
+                self.closed = False
+
+            async def send_frame(self, frame):
+                raise ConnectionResetError("peer closed")
+
+            def close(self):
+                self.closed = True
+
+        conn = DeadConn()
+        r.subscribe("s1", "claude", "test", ["github-actions"], conn)
+
+        result = await r.deliver({"source": "github-actions", "event_id": "e-bc009"})
+        assert result == "no_subscriber"
+        # Dead subscriber evicted from the router.
+        assert "s1" not in r._subscribers
+        assert "s1" not in r._order
+        # Writer closed to accelerate socket_server teardown.
+        assert conn.closed is True
+
+    async def test_deliver_evicts_on_broken_pipe_then_reroutes(self):
+        """After evicting the dead subscriber, a second event with a live
+        subscriber is delivered normally (no lingering dead entry)."""
+        r = Router(_config_legacy())
+
+        class DeadConn:
+            def __init__(self):
+                self.session_id = "s2"
+                self.adapter = "claude"
+                self.instance = "test"
+                self.sources = ["github-actions"]
+
+            async def send_frame(self, frame):
+                raise BrokenPipeError("broken pipe")
+
+            def close(self):
+                pass
+
+        live = MockConnection("s1", "claude", ["github-actions"], router=r)
+        r.subscribe("s1", "claude", "test", ["github-actions"], live)
+        r.subscribe("s2", "claude", "test", ["github-actions"], DeadConn())
+
+        first = await r.deliver({"source": "github-actions", "event_id": "e1"})
+        assert first == "no_subscriber"
+
+        second = await r.deliver({"source": "github-actions", "event_id": "e2"})
+        assert second == "queued"
+        # The wake went to the live connection.
+        assert any(f.get("type") == "wake" for f in live.sent)
+
+    async def test_deliver_does_not_swallow_non_connection_errors(self):
+        """BC-009: only OSError-family connection failures are caught. A
+        RuntimeError or TypeError from send_frame indicates a real bug and
+        must propagate (not be silently masked as a dead subscriber)."""
+        import pytest as _pytest
+
+        r = Router(_config_legacy())
+
+        class BugConn:
+            async def send_frame(self, frame):
+                raise RuntimeError("not a connection error — a real bug")
+
+            def close(self):
+                pass
+
+        r.subscribe("s1", "claude", "test", ["github-actions"], BugConn())
+
+        with _pytest.raises(RuntimeError, match="real bug"):
+            await r.deliver({"source": "github-actions", "event_id": "e-bug"})
+        # A non-connection failure must NOT evict the subscriber (it's a
+        # code bug, not a dead socket).
+        assert "s1" in r._subscribers

@@ -72,7 +72,32 @@ class Router:
             return "no_subscriber"
         ack_id = str(ULID())
         wake_frame = {"type": "wake", "ack_id": ack_id, "event": event}
-        await target.connection.send_frame(wake_frame)
+        try:
+            await target.connection.send_frame(wake_frame)
+        except OSError as exc:
+            # BC-009: the adapter disconnected between _resolve() and the
+            # send. OSError is the common ancestor of ConnectionError
+            # (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
+            # and the generic transport errors asyncio surfaces from
+            # StreamWriter.drain(). Re-resolving would race with the
+            # socket_server's teardown, so treat this subscriber as dead,
+            # evict it, and report no_subscriber rather than letting the
+            # connection error propagate to the HTTP handler as a 500.
+            #
+            # NOTE: this turns a mid-send disconnect into a terminal
+            # "no_subscriber" for the current event_id. dedupe.check()
+            # already consumed the event_id upstream, so a same-id retry
+            # is rejected as duplicate — this is the documented "wake hits
+            # live sessions only" design (AGENTS.md); durable redelivery
+            # is BC-WAKE-012.
+            log.warning(
+                "send_failed source=%s session_id=%s error=%s; evicting dead subscriber",
+                source,
+                target.session_id,
+                exc,
+            )
+            self._evict(target.session_id)
+            return "no_subscriber"
         log.info(
             "delivered source=%s ack_id=%s session_id=%s",
             source,
@@ -84,6 +109,22 @@ class Router:
         asyncio.ensure_future(self._wait_for_ack(source, ack_id, target.session_id))
 
         return "queued"
+
+    def _evict(self, session_id: str) -> None:
+        """Remove a subscriber whose connection is dead (BC-009).
+
+        The socket_server's _handleConnection finally-block also performs
+        this cleanup when it observes the broken socket; calling it here as
+        well is defensive and idempotent. Closing the writer prompts the
+        socket_server's read loop to unblock on the next event-loop tick.
+        """
+        sub = self._subscribers.get(session_id)
+        self.unsubscribe(session_id)
+        if sub is not None:
+            try:
+                sub.connection.close()
+            except Exception:
+                pass
 
     async def _wait_for_ack(
         self, source: str, ack_id: str, session_id: str
