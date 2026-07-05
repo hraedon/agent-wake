@@ -5,11 +5,14 @@ custody + per-source `principal_id` allowlist, `gating.py`), WI-2.1 (suite
 config + `doctor --json` conforming to the suite `ok`/`degraded` shape), WI-3.1
 (`install-harness` + daemon packaging: Dockerfile, systemd unit, Windows
 service), and WI-4.1 (secret backends: `secrets/` resolver + Vault + env) all
-landed and tested (253 daemon tests green with `[vault]`). Remaining: WI-4.2
-publication gate is scaffolded (checklist `docs/publication-gate.md` + a CI
-identifier-gate job) but the denylist has no patterns configured yet, and the
-public flip itself is owner-gated; Windows-Service live validation is a
-deployment task.
+landed and tested (253 daemon tests green with `[vault]`). WI-4.2 publication
+gate: denylist patterns configured (17 identifiers covering CA CN and all
+forms from adcs-lens + gpo-lens samples per the WI-010 lesson), `git
+filter-repo --dry-run` audit completed with zero leaks found across all 38
+commits, and the publication-review checklist verified through section 5
+(docs/publication-gate.md). Remaining: set the `AGENT_WAKE_FORBIDDEN_IDENTIFIERS`
+CI secret, reconcile feature branches, and the owner-gated public flip;
+Windows-Service live validation is a deployment task.
 **Author:** Claude (Fable 5), from the 2026-07-02 agent-suite deployment review
 **Strategic role:** agent-wake is the suite's external→session signaling: it lets
 CI, monitors, and cross-session messages drive agent work instead of only the
@@ -22,8 +25,9 @@ and its config/doctor conforming. See `/projects/agent-suite-blueprint.md`
 
 ## Ground truth at time of writing
 
-- agent-wake is on `hraedon/agent-wake`; `main` is 1 ahead of origin with an
-  uncommitted working tree (claude + opencode adapter edits, identity-layer work).
+- agent-wake is on `hraedon/agent-wake`; `main` is pushed and the working
+  tree is clean (the ahead-of-origin and uncommitted-tree state from the
+  original writing has been reconciled).
   Plan 001 (substrate→regista rename) is closed; an identity layer (per-source
   `principal_id`, trigger allowlist, schema hooks) landed.
 - **Two plans are open and directly relevant:** Plan 002 (secret management) and
