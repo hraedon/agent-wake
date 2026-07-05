@@ -1,6 +1,15 @@
 # Plan 004 — Suite cohesion: external signaling as a suite component
 
-**Status:** Proposed 2026-07-02
+**Status:** In progress 2026-07-05 — WI-1.1 (authenticated ingress + secret
+custody + per-source `principal_id` allowlist, `gating.py`), WI-2.1 (suite
+config + `doctor --json` conforming to the suite `ok`/`degraded` shape), WI-3.1
+(`install-harness` + daemon packaging: Dockerfile, systemd unit, Windows
+service), and WI-4.1 (secret backends: `secrets/` resolver + Vault + env) all
+landed and tested (253 daemon tests green with `[vault]`). Remaining: WI-4.2
+publication gate is scaffolded (checklist `docs/publication-gate.md` + a CI
+identifier-gate job) but the denylist has no patterns configured yet, and the
+public flip itself is owner-gated; Windows-Service live validation is a
+deployment task.
 **Author:** Claude (Fable 5), from the 2026-07-02 agent-suite deployment review
 **Strategic role:** agent-wake is the suite's external→session signaling: it lets
 CI, monitors, and cross-session messages drive agent work instead of only the
