@@ -66,21 +66,20 @@ jobs:
         run: bun test
         working-directory: adapters/opencode
 
+  # Pre-publication gate (Plan 004 WI-4.2 / blueprint §3): fail if forbidden
+  # work-domain / personal identifiers appear in tracked files. The denylist is
+  # never committed — it comes from the AGENT_WAKE_FORBIDDEN_IDENTIFIERS
+  # repository secret (borrowed from the gpo-lens gate pattern). The script exits
+  # 0 when the secret is unset, so the gate is a no-op until it is configured.
   identifier-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
-      - name: Check for work-domain identifiers
-        run: |
-          # Patterns that should not appear in public history.
-          # Add patterns here as they are identified during publication scrub.
-          PATTERNS=""
-          if [ -n "$PATTERNS" ]; then
-            if git log --all --oneline | grep -iE "$PATTERNS"; then
-              echo "Work-domain identifiers found in history"
-              exit 1
-            fi
-          fi
-          echo "Identifier gate: clean (no patterns configured yet)"
+          python-version: "3.12"
+      - name: Check for committed work-domain identifiers
+        env:
+          AGENT_WAKE_FORBIDDEN_IDENTIFIERS: ${{ secrets.AGENT_WAKE_FORBIDDEN_IDENTIFIERS }}
+        run: python3 scripts/check_committed_identifiers.py

@@ -41,33 +41,23 @@ Check for:
 - [ ] Internal IP addresses or network topology hints
 - [ ] Internal tool/service names specific to the workplace
 
-## 3. CI identifier gate
+## 3. Identifier gate (implemented — gpo-lens pattern)
 
-Add a CI job that fails if work-domain identifiers appear in new commits:
+The gate is `scripts/check_committed_identifiers.py`, borrowed from gpo-lens. The
+denylist is **never committed**: it comes from `AGENT_WAKE_FORBIDDEN_IDENTIFIERS`
+(whitespace-separated), resolved from the gitignored `.identifiers-denylist.local`
+locally and the repository secret of the same name in CI. The committed script
+carries no identifiers. It scans tracked files (CI) or staged files (the
+pre-commit hook), is UTF-16/BOM-aware, and exits 0 when the denylist is unset so
+a fresh clone is not bricked.
 
-```yaml
-# .github/workflows/identifier-gate.yml
-name: Identifier Gate
-on: [push, pull_request]
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check for work-domain identifiers
-        run: |
-          # Add patterns as needed
-          PATTERNS="COMPANY_NAME|internal\.hostname|codename"
-          if git log --all | grep -iE "$PATTERNS"; then
-            echo "Work-domain identifiers found in history"
-            exit 1
-          fi
-```
-
-- [ ] Identifier gate CI job is green on the scrubbed history
-- [ ] Gate patterns cover all known identifiers from step 2
+- [ ] `scripts/install-git-hooks.sh` run in this clone (pre-commit early warning —
+      catches a leak before it enters history, not after push)
+- [ ] `.identifiers-denylist.local` lists the forbidden identifiers (borrowed from
+      the gpo-lens denylist); it is gitignored
+- [ ] `AGENT_WAKE_FORBIDDEN_IDENTIFIERS` repository secret is set in CI
+- [ ] The `identifier-gate` CI job is green on the current tree and on the
+      scrubbed history
 
 ## 4. Secret scan
 

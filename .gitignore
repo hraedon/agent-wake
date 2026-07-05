@@ -38,3 +38,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# local denylist for the pre-commit identifier gate (never committed)
+.identifiers-denylist.local
