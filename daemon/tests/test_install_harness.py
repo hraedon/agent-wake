@@ -10,6 +10,7 @@ import pytest
 from agent_waked.cli.install_harness import (
     _wire_claude,
     _wire_opencode,
+    _wire_hermes,
     _run_install,
     _load_manifest,
     _save_manifest,
@@ -29,15 +30,21 @@ def isolated_home(tmp_path, monkeypatch):
     """Isolate all home-relative paths to tmp_path."""
     claude_settings = tmp_path / ".claude" / "settings.json"
     opencode_config = tmp_path / ".config" / "opencode" / "opencode.json"
+    hermes_env = tmp_path / ".hermes" / ".env"
+    hermes_plugin_dir = tmp_path / ".hermes" / "plugins" / "signaling" / "wake"
     manifest = tmp_path / ".config" / "agent-wake" / "install-manifest.json"
 
     monkeypatch.setattr("agent_waked.cli.install_harness._CLAUDE_SETTINGS", claude_settings)
     monkeypatch.setattr("agent_waked.cli.install_harness._OPENCODE_CONFIG", opencode_config)
+    monkeypatch.setattr("agent_waked.cli.install_harness._HERMES_ENV", hermes_env)
+    monkeypatch.setattr("agent_waked.cli.install_harness._HERMES_PLUGIN_DIR", hermes_plugin_dir)
     monkeypatch.setattr("agent_waked.cli.install_harness._MANIFEST_PATH", manifest)
 
     return type("Paths", (), {
         "claude": claude_settings,
         "opencode": opencode_config,
+        "hermes_env": hermes_env,
+        "hermes_plugin": hermes_plugin_dir,
         "manifest": manifest,
         "tmp": tmp_path,
     })()
@@ -231,16 +238,141 @@ def test_opencode_install_preserves_existing_config(isolated_home, tmp_path):
     assert any(p.get("path") == str(fake_dist) for p in config["plugins"])
 
 
+# ── hermes wiring ──────────────────────────────────────────────────────────────
+
+
+def _make_fake_plugin_source(tmp_path):
+    """Create a fake adapters/hermes/ source dir for testing."""
+    src = tmp_path / "fake_hermes_source"
+    src.mkdir()
+    (src / "plugin.yaml").write_text('name: wake\nversion: "0.1.0"\n', encoding="utf-8")
+    (src / "__init__.py").write_text("# fake plugin\n", encoding="utf-8")
+    return src
+
+
+def test_hermes_install_sets_env_vars(isolated_home):
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        actions = _wire_hermes(dry_run=False, uninstall=False, user=None)
+
+    assert any(a["kind"] in ("merge_env", "install_hermes") for a in actions)
+    env_content = isolated_home.hermes_env.read_text()
+    assert "AGENT_WAKE_CONFIG" in env_content
+    assert "# BEGIN agent-wake-harness-managed" in env_content
+    assert "# END agent-wake-harness-managed" in env_content
+
+
+def test_hermes_install_copies_plugin(isolated_home):
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=False, uninstall=False, user=None)
+
+    assert (isolated_home.hermes_plugin / "plugin.yaml").exists()
+    assert (isolated_home.hermes_plugin / "__init__.py").exists()
+
+
+def test_hermes_install_idempotent(isolated_home):
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=False, uninstall=False, user=None)
+        actions = _wire_hermes(dry_run=False, uninstall=False, user=None)
+
+    noop_actions = [a for a in actions if a["kind"] == "noop"]
+    assert len(noop_actions) >= 1
+    assert any("already" in a["detail"] for a in noop_actions)
+
+
+def test_hermes_install_missing_plugin_source(isolated_home):
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=None):
+        actions = _wire_hermes(dry_run=False, uninstall=False, user=None)
+
+    assert any(a["kind"] == "check_failed" for a in actions)
+
+
+def test_hermes_install_dry_run_does_not_write(isolated_home):
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=True, uninstall=False, user=None)
+
+    assert not isolated_home.hermes_env.exists()
+    assert not isolated_home.hermes_plugin.exists()
+    assert not isolated_home.manifest.exists()
+
+
+def test_hermes_uninstall_removes_env_and_plugin(isolated_home):
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=False, uninstall=False, user=None)
+        actions = _wire_hermes(dry_run=False, uninstall=True, user=None)
+
+    assert any(a["kind"] == "remove_keys" for a in actions)
+    if isolated_home.hermes_env.exists():
+        content = isolated_home.hermes_env.read_text()
+        assert "AGENT_WAKE_CONFIG" not in content
+        assert "# BEGIN agent-wake-harness-managed" not in content
+    assert not isolated_home.hermes_plugin.exists()
+
+
+def test_hermes_uninstall_idempotent(isolated_home):
+    actions = _wire_hermes(dry_run=False, uninstall=True, user=None)
+    assert all(a["kind"] == "noop" for a in actions)
+
+
+def test_hermes_install_preserves_existing_env(isolated_home):
+    """Existing user .env entries should be preserved, not overwritten."""
+    isolated_home.hermes_env.parent.mkdir(parents=True, exist_ok=True)
+    isolated_home.hermes_env.write_text(
+        "MY_CUSTOM_VAR=value\nOTHER_VAR=stuff\n", encoding="utf-8"
+    )
+
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=False, uninstall=False, user=None)
+
+    content = isolated_home.hermes_env.read_text()
+    assert "MY_CUSTOM_VAR=value" in content
+    assert "OTHER_VAR=stuff" in content
+    assert "AGENT_WAKE_CONFIG" in content
+
+
+def test_hermes_install_no_clobber_existing_value(isolated_home):
+    """Existing AGENT_WAKE_CONFIG with a different value should be preserved."""
+    isolated_home.hermes_env.parent.mkdir(parents=True, exist_ok=True)
+    isolated_home.hermes_env.write_text(
+        "AGENT_WAKE_CONFIG=/custom/path/config.json\n", encoding="utf-8"
+    )
+
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        actions = _wire_hermes(dry_run=False, uninstall=False, user=None)
+
+    content = isolated_home.hermes_env.read_text()
+    assert "/custom/path/config.json" in content
+    assert any(a["kind"] == "warn" for a in actions)
+
+
+def test_hermes_install_with_user_writes_principal_id(isolated_home):
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=False, uninstall=False, user="alice@example.com")
+
+    content = isolated_home.hermes_env.read_text()
+    assert "AGENT_WAKE_PRINCIPAL_ID=alice@example.com" in content
+
+
 # ── _run_install (dispatch) ────────────────────────────────────────────────────
 
 
-def test_run_install_all_targets_both_wired(isolated_home, tmp_path):
+def test_run_install_all_targets_all_wired(isolated_home, tmp_path):
     fake_dist = tmp_path / "dist" / "index.js"
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
+    hermes_src = _make_fake_plugin_source(tmp_path)
+
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"), \
-         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)), \
+         patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(hermes_src)):
         result = _run_install("all", dry_run=False, uninstall=False, user=None)
 
     assert result["tool"] == "agent-wake"

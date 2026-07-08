@@ -1,0 +1,9 @@
+name: wake
+version: "0.1.0"
+description: |
+  agent-wake signaling plugin for Hermes Agent.
+  Subscribes to wake events (HTTP webhook or regista NOTIFY) and injects
+  them into the active session context.
+hooks:
+  - on_session_start
+  - on_session_end
