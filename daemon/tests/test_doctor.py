@@ -1,9 +1,8 @@
 """Tests for agent-wake doctor — health checks and JSON output."""
 
 import json
-import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -62,11 +61,15 @@ def test_doctor_json_regista_none_when_no_suite(cfg_with_secret):
 
 
 def test_doctor_checks_all_present(cfg_with_secret):
-    """All five named checks should be present."""
+    """All named checks should be present."""
     report = run_checks()
     check_names = [c["name"] for c in report["checks"]]
     assert "config_present" in check_names
     assert "ingress_reachable" in check_names
+    assert "auth_configured" in check_names
+    assert "adapters_installed" in check_names
+    assert "allowlist_present" in check_names
+    assert "delivery_health" in check_names
     assert "auth_configured" in check_names
     assert "adapters_installed" in check_names
     assert "allowlist_present" in check_names
@@ -238,3 +241,57 @@ def test_main_text_output(cfg_with_secret, capsys):
     out = capsys.readouterr().out
     assert "agent-wake doctor" in out
     assert rc in (0, 1)
+
+
+# ── delivery_health check (Plan 005) ─────────────────────────────────
+
+
+def _cfg_with_delivery(tmp_path, monkeypatch, delivery):
+    monkeypatch.setenv("TEST_DOCTOR_SECRET", "test-secret-value")
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "listen": {"host": "127.0.0.1", "port": 8788},
+        "sources": {"demo": {"secret_env": "TEST_DOCTOR_SECRET"}},
+        "routing": {},
+        "delivery": delivery,
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    monkeypatch.setattr(
+        "agent_waked.suite_config.per_user_path",
+        lambda: tmp_path / "ne.env",
+    )
+    monkeypatch.setattr(
+        "agent_waked.suite_config.system_path",
+        lambda: tmp_path / "ne2.env",
+    )
+
+
+def test_delivery_health_skip_when_no_delivery(cfg_with_secret):
+    """No delivery config → skip (Plan 005 not deployed)."""
+    from agent_waked.doctor import _check_delivery_health
+    status, detail = _check_delivery_health()
+    assert status == "skip"
+
+
+def test_delivery_health_warn_when_empty_principals(tmp_path, monkeypatch):
+    """Principals configured but with no channels → warn."""
+    _cfg_with_delivery(tmp_path, monkeypatch, {"operator": {}})
+    from agent_waked.doctor import _check_delivery_health
+    status, detail = _check_delivery_health()
+    assert status == "warn"
+    assert "operator" in detail
+
+
+def test_delivery_health_ok_when_configured(tmp_path, monkeypatch):
+    """Delivery channels configured and daemon not running → ok (live unchecked)."""
+    monkeypatch.setenv("WEBHOOK_SECRET", "wh")
+    _cfg_with_delivery(tmp_path, monkeypatch, {
+        "operator": {
+            "webhook": {"url": "https://hooks.example.com/x", "secret_uri": "env://WEBHOOK_SECRET"}
+        }
+    })
+    from agent_waked.doctor import _check_delivery_health
+    status, detail = _check_delivery_health()
+    assert status == "ok"
+    assert "1 principal" in detail or "delivery channel" in detail

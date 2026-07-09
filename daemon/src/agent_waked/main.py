@@ -19,6 +19,7 @@ from typing import Any
 from aiohttp import web
 
 from .config import ConfigError, load_config
+from .delivery import HumanDelivery
 from .ingest import create_ingest_app
 from .outbox import Outbox
 from .router import Router
@@ -259,6 +260,8 @@ async def _run() -> int:
     router = Router(cfg)
     resolver = SecretResolver(vault_cfg=cfg.get("vault"))
 
+    delivery = HumanDelivery(cfg, resolver)
+
     outbox = Outbox(cfg)
     await outbox.start()
 
@@ -271,6 +274,7 @@ async def _run() -> int:
         socket_server=socket_server,
         version=_VERSION,
         resolver=resolver,
+        delivery=delivery,
     )
     runner = web.AppRunner(app)
     try:
@@ -314,6 +318,7 @@ async def _run() -> int:
     log.info("shutting down")
     socket_server.close()
     await outbox.close()
+    await delivery.close()
     try:
         await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
     except asyncio.TimeoutError:

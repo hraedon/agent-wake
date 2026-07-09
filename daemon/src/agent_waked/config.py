@@ -27,6 +27,8 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "agent-wake" / "config.json"
 
 _VALID_SCHEMES = {"env", "vault"}
 
+_VALID_CHANNEL_KINDS = {"webhook", "email"}
+
 
 class ConfigError(Exception):
     pass
@@ -198,6 +200,21 @@ def load_config() -> dict[str, Any]:
     if vault_cfg is not None:
         _validate_vault_block(vault_cfg)
 
+    # Plan 005 WI-1.1: delivery routing table (principal_id → channels).
+    delivery_raw = raw.get("delivery")
+    if delivery_raw is not None:
+        delivery = _validate_principals_block(delivery_raw)
+        if _principals_need_vault(delivery):
+            needs_vault = True
+        if needs_vault and not vault_cfg:
+            raise ConfigError(
+                "One or more delivery channels use vault:// URIs but no "
+                "'vault' block is present in config."
+            )
+        cfg["delivery"] = delivery
+    else:
+        cfg["delivery"] = {}
+
     return cfg
 
 
@@ -220,3 +237,115 @@ def _validate_vault_block(vault: object) -> None:
         raise ConfigError("'vault.auth.role_id' must be a non-empty string.")
     if not isinstance(auth.get("secret_id_file"), str) or not auth["secret_id_file"]:
         raise ConfigError("'vault.auth.secret_id_file' must be a non-empty string.")
+
+
+def _validate_principals_block(principals: object) -> dict[str, dict[str, dict[str, Any]]]:
+    """Validate the ``principals`` routing table (Plan 005 WI-1.1).
+
+    Each principal maps ``principal_id`` → one or more delivery channel
+    configs.  Channel configs are validated per-kind by ``_validate_channel``.
+    Returns a normalised copy.
+    """
+    if not isinstance(principals, dict):
+        raise ConfigError(
+            "'delivery' must be an object mapping principal_id → channels."
+        )
+
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for pid, channels in principals.items():
+        if not isinstance(pid, str) or not pid:
+            raise ConfigError("principal_id keys must be non-empty strings.")
+        if not isinstance(channels, dict):
+            raise ConfigError(f"Principal {pid!r}: channels must be an object.")
+        validated: dict[str, dict[str, Any]] = {}
+        for kind, cfg in channels.items():
+            if kind not in _VALID_CHANNEL_KINDS:
+                raise ConfigError(
+                    f"Principal {pid!r}: unknown channel kind {kind!r}. "
+                    f"Supported: {sorted(_VALID_CHANNEL_KINDS)}"
+                )
+            if not isinstance(cfg, dict):
+                raise ConfigError(
+                    f"Principal {pid!r}: channel {kind!r} must be an object."
+                )
+            validated[kind] = _validate_channel(kind, cfg, pid)
+        result[pid] = validated
+    return result
+
+
+def _validate_channel(
+    kind: str, cfg: dict[str, Any], pid: str
+) -> dict[str, Any]:
+    """Validate a single delivery channel config (returns a normalised copy)."""
+    if kind == "webhook":
+        return _validate_webhook_channel(cfg, pid)
+    if kind == "email":
+        return _validate_email_channel(cfg, pid)
+    raise ConfigError(
+        f"Principal {pid!r}: unknown channel kind {kind!r}. "
+        f"Supported: {sorted(_VALID_CHANNEL_KINDS)}"
+    )
+
+
+def _validate_webhook_channel(cfg: dict[str, Any], pid: str) -> dict[str, Any]:
+    url = cfg.get("url")
+    if not isinstance(url, str) or not url:
+        raise ConfigError(f"Principal {pid!r} webhook: 'url' is required.")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigError(
+            f"Principal {pid!r} webhook: URL must use http or https "
+            f"(got scheme {parsed.scheme!r})."
+        )
+
+    secret_uri = cfg.get("secret_uri")
+    if not isinstance(secret_uri, str) or not secret_uri:
+        raise ConfigError(
+            f"Principal {pid!r} webhook: 'secret_uri' is required "
+            "(signing secret for the outbound webhook)."
+        )
+    _parse_uri(secret_uri, f"{pid}/webhook")
+
+    return {"url": url, "secret_uri": secret_uri}
+
+
+def _validate_email_channel(cfg: dict[str, Any], pid: str) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for field in ("smtp_host", "from_addr", "to_addr"):
+        val = cfg.get(field)
+        if not isinstance(val, str) or not val:
+            raise ConfigError(f"Principal {pid!r} email: '{field}' is required.")
+        result[field] = val
+
+    port = cfg.get("smtp_port", 587)
+    if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
+        raise ConfigError(
+            f"Principal {pid!r} email: 'smtp_port' must be an integer 1–65535."
+        )
+    result["smtp_port"] = port
+
+    use_tls = cfg.get("use_tls", True)
+    if not isinstance(use_tls, bool):
+        raise ConfigError(f"Principal {pid!r} email: 'use_tls' must be a boolean.")
+    result["use_tls"] = use_tls
+
+    secret_uri = cfg.get("secret_uri")
+    if secret_uri is not None:
+        if not isinstance(secret_uri, str) or not secret_uri:
+            raise ConfigError(
+                f"Principal {pid!r} email: 'secret_uri' must be a non-empty string."
+            )
+        _parse_uri(secret_uri, f"{pid}/email")
+        result["secret_uri"] = secret_uri
+
+    return result
+
+
+def _principals_need_vault(principals: dict[str, dict[str, dict[str, Any]]]) -> bool:
+    """True if any delivery channel references a vault:// secret URI."""
+    for channels in principals.values():
+        for cfg in channels.values():
+            secret_uri = cfg.get("secret_uri")
+            if isinstance(secret_uri, str) and secret_uri.startswith("vault://"):
+                return True
+    return False

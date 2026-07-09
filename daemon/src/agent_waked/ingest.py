@@ -6,6 +6,7 @@ Semantics preserved exactly; the only addition is that after a successful
 gate + dedupe the handler calls ``Router.deliver(event)``.
 """
 
+import asyncio
 import json
 import logging
 from collections import deque
@@ -17,6 +18,7 @@ from ulid import ULID
 from .gating import check_trigger_identity, verify_signature, verify_signature_any
 
 if TYPE_CHECKING:
+    from .delivery import HumanDelivery
     from .router import Router
     from .secrets.resolver import SecretResolver
     from .socket_server import SocketServer
@@ -131,6 +133,7 @@ def create_ingest_app(
     socket_server: "SocketServer | None" = None,
     version: str = "0.1.0",
     resolver: "SecretResolver | None" = None,
+    delivery: "HumanDelivery | None" = None,
 ) -> web.Application:
     dedupe = Dedupe()
 
@@ -206,13 +209,48 @@ def create_ingest_app(
         if dedupe.check(event_id):
             return _json_response(202, {"status": "duplicate", "event_id": event_id})
 
+        delivery_result: dict[str, Any] | None = None
+        if delivery is not None:
+            meta = event.get("meta", {})
+            if isinstance(meta, dict) and meta.get("target"):
+                principal_id = str(meta["target"])
+                if delivery.resolve_principal(principal_id) is None:
+                    delivery.health.record_unknown_principal(principal_id)
+                    log.warning(
+                        "delivery rejected unknown principal=%s source=%s "
+                        "event_id=%s",
+                        principal_id,
+                        source,
+                        event_id,
+                    )
+                    return _json_response(
+                        422,
+                        {
+                            "error": "unknown principal",
+                            "principal_id": principal_id,
+                            "event_id": event_id,
+                        },
+                    )
+                asyncio.ensure_future(delivery.deliver(event))
+                delivery_result = {
+                    "status": "dispatched",
+                    "principal_id": principal_id,
+                }
+
         result = await router.deliver(event)
         if result == "no_subscriber":
-            return _json_response(
-                202, {"status": "no_subscriber", "event_id": event_id}
-            )
+            response: dict[str, Any] = {
+                "status": "no_subscriber",
+                "event_id": event_id,
+            }
+            if delivery_result is not None:
+                response["delivery"] = delivery_result
+            return _json_response(202, response)
 
-        return _json_response(202, {"status": "queued", "event_id": event_id})
+        response = {"status": "queued", "event_id": event_id}
+        if delivery_result is not None:
+            response["delivery"] = delivery_result
+        return _json_response(202, response)
 
     async def default_handler(request: web.Request) -> web.Response:
         return _json_response(404, {"error": "not found"})
@@ -221,6 +259,8 @@ def create_ingest_app(
         body: dict[str, Any] = {"status": "ok", "version": version}
         if socket_server is not None:
             body["adapters"] = len(socket_server.connections)
+        if delivery is not None:
+            body["delivery"] = delivery.health.summary()
         return _json_response(200, body)
 
     app = web.Application()

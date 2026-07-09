@@ -185,6 +185,66 @@ def _check_allowlist_present() -> tuple[str, str]:
     return "warn", "no sources have principal_id configured (identity layer inactive)"
 
 
+def _check_delivery_health() -> tuple[str, str]:
+    """Check: human-directed delivery channels are healthy (Plan 005 WI-1.2).
+
+    If no principals are configured, this is a skip (delivery not deployed).
+    If principals are configured but some lack delivery channels, warn.
+    If the daemon is running, probe its health endpoint for live failure
+    status (dead receivers, unknown principals).
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return "skip", "config not loadable"
+
+    delivery = cfg.get("delivery", {})
+    if not delivery:
+        return "skip", "no delivery channels configured (Plan 005 not deployed)"
+
+    empty = [pid for pid, channels in delivery.items() if not channels]
+    if empty:
+        return "warn", f"principals without delivery channels: {', '.join(empty)}"
+
+    # Probe the daemon's health endpoint for live delivery status.
+    listen = cfg.get("listen", {})
+    host = listen.get("host", "127.0.0.1")
+    port = listen.get("port", 8788)
+    try:
+        from .main import resolve_listen
+        host, port = resolve_listen(cfg)
+    except Exception:
+        pass
+
+    try:
+        url = f"http://{host}:{port}/"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if 200 <= resp.status < 300:
+                body = json.loads(resp.read().decode("utf-8"))
+                if isinstance(body, dict):
+                    delivery_status = body.get("delivery")
+                    if isinstance(delivery_status, dict):
+                        failing = delivery_status.get("failing_channels", [])
+                        unknown = delivery_status.get("unknown_principals", [])
+                        parts: list[str] = []
+                        if failing:
+                            chans = ", ".join(
+                                f"{f.get('channel', '?')}→{f.get('principal_id', '?')}"
+                                for f in failing
+                            )
+                            parts.append(f"delivery channel failures: {chans} (see daemon logs for detail)")
+                        if unknown:
+                            parts.append(f"events targeted unknown principals: {', '.join(unknown)}")
+                        if parts:
+                            return "warn", "; ".join(parts)
+                        n = len(delivery)
+                        return "ok", f"{n} principal(s), delivery healthy"
+        return "ok", f"{len(delivery)} delivery channel(s) configured (daemon health endpoint returned HTTP {resp.status})"
+    except Exception:
+        return "ok", f"{len(delivery)} delivery channel(s) configured (daemon not running; live health unchecked)"
+
+
 def _check_regista() -> dict[str, Any] | None:
     """Check regista connectivity if suite config is present.
 
@@ -245,6 +305,7 @@ def run_checks() -> dict[str, Any]:
         ("auth_configured", _check_auth_configured),
         ("adapters_installed", _check_adapters_installed),
         ("allowlist_present", _check_allowlist_present),
+        ("delivery_health", _check_delivery_health),
     ]:
         status, detail = fn()
         checks.append({"name": name, "status": status, "detail": detail})
