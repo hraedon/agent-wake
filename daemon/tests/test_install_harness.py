@@ -318,6 +318,23 @@ def test_hermes_uninstall_idempotent(isolated_home):
     assert all(a["kind"] == "noop" for a in actions)
 
 
+def test_hermes_uninstall_dry_run_does_not_delete_plugin(isolated_home):
+    """--dry-run --uninstall must report intent but not touch the filesystem."""
+    src = _make_fake_plugin_source(isolated_home.tmp)
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        _wire_hermes(dry_run=False, uninstall=False, user=None)
+    assert isolated_home.hermes_plugin.exists()
+    assert isolated_home.hermes_env.exists()
+
+    with patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(src)):
+        actions = _wire_hermes(dry_run=True, uninstall=True, user=None)
+
+    assert isolated_home.hermes_plugin.exists(), "dry-run must not delete plugin dir"
+    assert isolated_home.hermes_env.exists(), "dry-run must not delete env file"
+    assert "# BEGIN agent-wake-harness-managed" in isolated_home.hermes_env.read_text()
+    assert any(a["kind"] == "remove_keys" for a in actions), "dry-run should still report intent"
+
+
 def test_hermes_install_preserves_existing_env(isolated_home):
     """Existing user .env entries should be preserved, not overwritten."""
     isolated_home.hermes_env.parent.mkdir(parents=True, exist_ok=True)

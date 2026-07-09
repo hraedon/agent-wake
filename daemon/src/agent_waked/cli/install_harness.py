@@ -726,8 +726,9 @@ def _unwire_hermes(
     if plugin_dir:
         pdir = Path(plugin_dir)
         if pdir.exists():
-            shutil.rmtree(pdir)
             plugin_removed = True
+            if not dry_run:
+                shutil.rmtree(pdir)
 
     if removed or plugin_removed:
         actions.append({
