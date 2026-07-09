@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import agent_waked.config as cfg_module
 from agent_waked.config import ConfigError, load_config
 
 
@@ -210,4 +211,80 @@ def test_delivery_empty_principal_id(monkeypatch, tmp_path):
     _write_config(cfg_path, _base_cfg({"": {"webhook": {"url": "https://x", "secret_uri": "env://K"}}}))
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
     with pytest.raises(ConfigError, match="non-empty"):
+        load_config()
+
+
+# ── SSRF protection (Plan 005 review: webhook URL must not target internal IPs) ─
+
+
+def _webhook_cfg(url: str) -> dict:
+    return _base_cfg({
+        "operator": {"webhook": {"url": url, "secret_uri": "env://K"}}
+    })
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1",       # loopback v4
+        "::1",             # loopback v6
+        "169.254.169.254", # link-local / cloud metadata
+        "10.0.0.1",        # private 10/8
+        "172.16.0.1",      # private 172.16/12
+        "192.168.1.1",     # private 192.168/16
+        "100.64.0.1",      # CGNAT 100.64/10 (RFC 6598 — is_private is False)
+        "0.0.0.0",         # unspecified
+        "224.0.0.1",       # multicast
+    ],
+)
+def test_webhook_ssrf_rejects_forbidden_ip(monkeypatch, tmp_path, ip):
+    monkeypatch.setenv("TEST_SECRET", "s")
+    monkeypatch.setenv("K", "k")
+    monkeypatch.setattr(cfg_module, "_resolve_hostname", lambda host: [ip])
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, _webhook_cfg("https://hooks.example.com/inbox"))
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="forbidden address"):
+        load_config()
+
+
+def test_webhook_ssrf_accepts_public_ip(monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_SECRET", "s")
+    monkeypatch.setenv("K", "k")
+    monkeypatch.setattr(cfg_module, "_resolve_hostname", lambda host: ["93.184.216.34"])
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, _webhook_cfg("https://hooks.example.com/inbox"))
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    cfg = load_config()
+    assert cfg["delivery"]["operator"]["webhook"]["url"] == "https://hooks.example.com/inbox"
+
+
+def test_webhook_ssrf_rejects_any_internal_in_multi_resolve(monkeypatch, tmp_path):
+    """If any resolved address is forbidden, reject (don't allow mixed results)."""
+    monkeypatch.setenv("TEST_SECRET", "s")
+    monkeypatch.setenv("K", "k")
+    monkeypatch.setattr(
+        cfg_module,
+        "_resolve_hostname",
+        lambda host: ["93.184.216.34", "127.0.0.1"],
+    )
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, _webhook_cfg("https://hooks.example.com/inbox"))
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="forbidden address"):
+        load_config()
+
+
+def test_webhook_ssrf_rejects_unresolvable_hostname(monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_SECRET", "s")
+    monkeypatch.setenv("K", "k")
+
+    def _fail(host: str) -> list[str]:
+        raise OSError("no such host")
+
+    monkeypatch.setattr(cfg_module, "_resolve_hostname", _fail)
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, _webhook_cfg("https://hooks.example.com/inbox"))
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="does not resolve"):
         load_config()

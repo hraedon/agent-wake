@@ -1,12 +1,12 @@
 """Tests for agent_waked.ingest — HTTP ingest with gating, dedupe, routing."""
 
+import asyncio
 import hashlib
 import hmac
 import json
 
 import pytest
 
-from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from agent_waked.ingest import create_ingest_app
@@ -418,3 +418,154 @@ async def test_identity_allowlist_rejects_missing_identity():
     assert resp.status == 403
     assert len(router.delivered) == 0
     await cli.close()
+
+
+# ── human-directed delivery integration (Plan 005) ───────────────────
+
+
+class _FakeResolver:
+    async def resolve(self, uri: str) -> bytes:
+        return b"k"
+
+
+def _delivery_event(target: str, event_id: str = "evt-del-1") -> bytes:
+    return json.dumps({
+        "v": 0, "event_id": event_id, "source": "test",
+        "kind": "alert", "content": "hi",
+        "meta": {"target": target}, "wake": True,
+    }).encode()
+
+
+@pytest.mark.asyncio
+async def test_delivery_to_authorized_principal_dispatches():
+    """A source with allowed_target_principals dispatches to a known principal."""
+    from agent_waked.delivery import HumanDelivery
+
+    config = {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "allowed_target_principals": ["operator"],
+            },
+        },
+        "delivery": {
+            "operator": {"webhook": {
+                "url": "https://hooks.example.com/inbox",
+                "secret_uri": "env://WH",
+            }},
+        },
+        "routing": {},
+    }
+    router = MockRouter()
+    delivery = HumanDelivery(config, _FakeResolver())
+    delivered: list[dict] = []
+
+    async def _record(event):
+        delivered.append(event)
+        return {"status": "delivered"}
+
+    delivery.deliver = _record  # type: ignore[method-assign]
+
+    app = create_ingest_app(config, router, delivery=delivery)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        body = _delivery_event("operator")
+        sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+        resp = await cli.post("/", data=body, headers={
+            "X-AgentWake-Source": "test",
+            "X-AgentWake-Signature": sig,
+        })
+        assert resp.status == 202
+        data = await resp.json()
+        assert data["delivery"]["status"] == "dispatched"
+        assert data["delivery"]["principal_id"] == "operator"
+        # The fire-and-forget deliver task was scheduled; let it run.
+        await asyncio.sleep(0.05)
+        assert len(delivered) == 1
+        assert delivered[0]["meta"]["target"] == "operator"
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_unknown_principal_422():
+    """An event targeting an unknown principal is rejected with 422."""
+    config = {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "allowed_target_principals": ["operator"],
+            },
+        },
+        "delivery": {"operator": {"webhook": {
+            "url": "https://hooks.example.com/inbox", "secret_uri": "env://WH",
+        }}},
+        "routing": {},
+    }
+    router = MockRouter()
+    from agent_waked.delivery import HumanDelivery
+    delivery = HumanDelivery(config, _FakeResolver())
+    app = create_ingest_app(config, router, delivery=delivery)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        body = _delivery_event("nobody")
+        sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+        resp = await cli.post("/", data=body, headers={
+            "X-AgentWake-Source": "test",
+            "X-AgentWake-Signature": sig,
+        })
+        assert resp.status == 422
+        data = await resp.json()
+        assert data["error"] == "unknown principal"
+        assert data["principal_id"] == "nobody"
+        assert len(router.delivered) == 0
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_unauthorized_source_403():
+    """A source without allowed_target_principals cannot deliver (default-deny)."""
+    config = {
+        "sources": {
+            "test": {"secret": b"shhh", "callback_url": None},
+        },
+        "delivery": {"operator": {"webhook": {
+            "url": "https://hooks.example.com/inbox", "secret_uri": "env://WH",
+        }}},
+        "routing": {},
+    }
+    router = MockRouter()
+    from agent_waked.delivery import HumanDelivery
+    delivery = HumanDelivery(config, _FakeResolver())
+    delivered: list[dict] = []
+
+    async def _record(event):
+        delivered.append(event)
+        return {"status": "delivered"}
+
+    delivery.deliver = _record  # type: ignore[method-assign]
+    app = create_ingest_app(config, router, delivery=delivery)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        body = _delivery_event("operator")
+        sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+        resp = await cli.post("/", data=body, headers={
+            "X-AgentWake-Source": "test",
+            "X-AgentWake-Signature": sig,
+        })
+        assert resp.status == 403
+        data = await resp.json()
+        assert data["error"] == "source not authorized to deliver to principal"
+        assert data["principal_id"] == "operator"
+        assert len(delivered) == 0
+    finally:
+        await cli.close()

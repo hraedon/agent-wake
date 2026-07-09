@@ -87,7 +87,9 @@ class WebhookChannel:
         for attempt in range(self._max_retries):
             t0 = time.monotonic()
             try:
-                async with session.post(url, data=body, headers=headers) as resp:
+                async with session.post(
+                    url, data=body, headers=headers, allow_redirects=False
+                ) as resp:
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     if 200 <= resp.status < 300:
                         log.info(

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Any
 
@@ -157,7 +158,10 @@ def _smtp_send(
     try:
         server.ehlo()
         if use_tls:
-            server.starttls()
+            # Validate the server certificate: a default SSL context enforces
+            # hostname + CA-chain verification, preventing MITM/cert-spoofing
+            # on the STARTTLS upgrade.
+            server.starttls(context=ssl.create_default_context())
             server.ehlo()
         if password:
             server.login(from_addr, password)

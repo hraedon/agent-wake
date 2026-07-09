@@ -231,6 +231,31 @@ def create_ingest_app(
                             "event_id": event_id,
                         },
                     )
+                # Delivery authorization (Plan 005): a source may only deliver
+                # to principals it explicitly declares in allowed_target_principals.
+                # Default-deny — an authenticated source cannot steer deliveries
+                # to arbitrary principals.
+                allowed_targets = source_cfg.get("allowed_target_principals")
+                if (
+                    not isinstance(allowed_targets, list)
+                    or principal_id not in allowed_targets
+                ):
+                    log.warning(
+                        "delivery denied source=%s target=%s event_id=%s "
+                        "(not in allowed_target_principals)",
+                        source,
+                        principal_id,
+                        event_id,
+                    )
+                    return _json_response(
+                        403,
+                        {
+                            "error": "source not authorized to deliver to principal",
+                            "source": source,
+                            "principal_id": principal_id,
+                            "event_id": event_id,
+                        },
+                    )
                 asyncio.ensure_future(delivery.deliver(event))
                 delivery_result = {
                     "status": "dispatched",
