@@ -1,18 +1,23 @@
 # Plan 004 — Suite cohesion: external signaling as a suite component
 
-**Status:** In progress 2026-07-05 — WI-1.1 (authenticated ingress + secret
+**Status:** In progress 2026-07-09 — WI-1.1 (authenticated ingress + secret
 custody + per-source `principal_id` allowlist, `gating.py`), WI-2.1 (suite
 config + `doctor --json` conforming to the suite `ok`/`degraded` shape), WI-3.1
 (`install-harness` + daemon packaging: Dockerfile, systemd unit, Windows
 service), and WI-4.1 (secret backends: `secrets/` resolver + Vault + env) all
-landed and tested (253 daemon tests green with `[vault]`). WI-4.2 publication
+landed and tested (359 daemon tests green with `[vault]`). WI-4.2 publication
 gate: denylist patterns configured (17 identifiers covering CA CN and all
 forms from adcs-lens + gpo-lens samples per the WI-010 lesson), `git
-filter-repo --dry-run` audit completed with zero leaks found across all 38
-commits, and the publication-review checklist verified through section 5
-(docs/publication-gate.md). Remaining: set the `AGENT_WAKE_FORBIDDEN_IDENTIFIERS`
-CI secret, reconcile feature branches, and the owner-gated public flip;
-Windows-Service live validation is a deployment task.
+filter-repo --dry-run` audit re-verified with zero leaks found across all 44
+commits, the publication-review checklist verified through section 5
+(docs/publication-gate.md), the identifier-gate scanner now has unit tests
+(27 tests), a committed `scripts/generate_replacements.py` makes the
+filter-repo process reproducible, and the pre-commit hook is activated
+locally. Dual-harness validation test confirms both Claude and opencode
+adapter paths receive consistent config vocabulary. Remaining: set the
+`AGENT_WAKE_FORBIDDEN_IDENTIFIERS` CI secret, reconcile feature branches,
+and the owner-gated public flip; Windows-Service live validation is a
+deployment task.
 **Author:** Claude (Fable 5), from the 2026-07-02 agent-suite deployment review
 **Strategic role:** agent-wake is the suite's external→session signaling: it lets
 CI, monitors, and cross-session messages drive agent work instead of only the

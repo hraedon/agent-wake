@@ -238,6 +238,19 @@ def test_opencode_install_preserves_existing_config(isolated_home, tmp_path):
     assert any(p.get("path") == str(fake_dist) for p in config["plugins"])
 
 
+def test_opencode_install_with_user_writes_principal_id(isolated_home, tmp_path):
+    """--user should write AGENT_WAKE_PRINCIPAL_ID to the opencode env block."""
+    fake_dist = tmp_path / "dist" / "index.js"
+    fake_dist.parent.mkdir(parents=True)
+    fake_dist.touch()
+
+    with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+        _wire_opencode(dry_run=False, uninstall=False, user="alice@example.com")
+
+    config = json.loads(isolated_home.opencode.read_text())
+    assert config["env"]["AGENT_WAKE_PRINCIPAL_ID"] == "alice@example.com"
+
+
 # ── hermes wiring ──────────────────────────────────────────────────────────────
 
 
@@ -464,3 +477,69 @@ def test_claude_uninstall_missing_env_block_no_crash(isolated_home):
         actions = _wire_claude(dry_run=False, uninstall=True, user=None)
 
     assert all(a["kind"] != "error" for a in actions)
+
+
+# ── dual-harness validation (Plan 004 harness note) ────────────────────────────
+
+
+def test_dual_harness_config_vocabulary_consistent(isolated_home, tmp_path, monkeypatch):
+    """Both claude and opencode receive the same AGENT_WAKE_CONFIG value.
+
+    Plan 004's harness note requires a dual-harness validation confirming the
+    cohesion changes (config vocabulary, secret resolution) don't regress an
+    existing opencode setup. This test wires both harnesses simultaneously and
+    verifies the config vocabulary is consistent: both get AGENT_WAKE_CONFIG
+    pointing at the same path, and --user propagates AGENT_WAKE_PRINCIPAL_ID
+    to both env blocks identically.
+    """
+    fake_dist = tmp_path / "dist" / "index.js"
+    fake_dist.parent.mkdir(parents=True)
+    fake_dist.touch()
+
+    custom_config = str(tmp_path / "custom-wake.json")
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", custom_config)
+
+    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"), \
+         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+        _wire_claude(dry_run=False, uninstall=False, user="bob@example.com")
+        _wire_opencode(dry_run=False, uninstall=False, user="bob@example.com")
+
+    claude_cfg = json.loads(isolated_home.claude.read_text())
+    opencode_cfg = json.loads(isolated_home.opencode.read_text())
+
+    # Both harnesses get the same AGENT_WAKE_CONFIG value
+    assert claude_cfg["env"]["AGENT_WAKE_CONFIG"] == custom_config
+    assert opencode_cfg["env"]["AGENT_WAKE_CONFIG"] == custom_config
+    assert claude_cfg["env"]["AGENT_WAKE_CONFIG"] == opencode_cfg["env"]["AGENT_WAKE_CONFIG"]
+
+    # --user propagates AGENT_WAKE_PRINCIPAL_ID to both identically
+    assert claude_cfg["env"]["AGENT_WAKE_PRINCIPAL_ID"] == "bob@example.com"
+    assert opencode_cfg["env"]["AGENT_WAKE_PRINCIPAL_ID"] == "bob@example.com"
+
+    # opencode also has the plugin registered
+    assert any(p.get("path") == str(fake_dist) for p in opencode_cfg.get("plugins", []))
+
+
+def test_dual_harness_uninstall_cleans_both(isolated_home, tmp_path):
+    """Uninstalling both harnesses leaves no wake env vars behind."""
+    fake_dist = tmp_path / "dist" / "index.js"
+    fake_dist.parent.mkdir(parents=True)
+    fake_dist.touch()
+
+    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"), \
+         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+        _wire_claude(dry_run=False, uninstall=False, user=None)
+        _wire_opencode(dry_run=False, uninstall=False, user=None)
+        _wire_claude(dry_run=False, uninstall=True, user=None)
+        _wire_opencode(dry_run=False, uninstall=True, user=None)
+
+    if isolated_home.claude.exists():
+        claude_cfg = json.loads(isolated_home.claude.read_text())
+        assert "AGENT_WAKE_CONFIG" not in claude_cfg.get("env", {})
+    if isolated_home.opencode.exists():
+        opencode_cfg = json.loads(isolated_home.opencode.read_text())
+        assert "AGENT_WAKE_CONFIG" not in opencode_cfg.get("env", {})
+        assert not any(
+            p.get("path") == str(fake_dist)
+            for p in opencode_cfg.get("plugins", [])
+        )
