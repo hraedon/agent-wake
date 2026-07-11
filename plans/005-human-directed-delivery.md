@@ -1,6 +1,6 @@
 # Plan 005 — Human-directed delivery: wake the human, not just the agent
 
-**Status:** Proposed 2026-07-07.
+**Status:** In Progress — human delivery implemented; operational loop remains.
 **Author:** Claude (Fable 5), from the 2026-07-07 suite v2 gaps review
 **Strategic role:** agent-wake today moves signals *into* agent sessions.
 The suite's v2 human-visibility story needs the mirror image: signals that
@@ -72,3 +72,13 @@ WI-1.1 first (identity underpins routing). WI-1.2 pairs with dossier Plan 018
 WI-2.1 for the live path; WI-1.3/1.4 follow. Tier-2 caveat stands: none of
 this blocks the Tier 0–1 core, but the strict-gate deployment is materially
 less usable without WI-1.2, so schedule it with the human-visibility wave.
+
+## Implementation note — 2026-07-11
+
+WI-1.1 through WI-1.3 are implemented. The dossier integration now has an
+executable contract proof covering HMAC authentication, service-identity gating,
+explicit target authorization, human dispatch, and denial of an unapproved
+principal. Email rendering recognizes dossier's canonical
+`awaiting_your_accept`, `review_requested`, and `item_returned` event kinds.
+WI-1.4 remains dependent on the suite-owned scheduled operational alert loop, so
+the plan remains In Progress.

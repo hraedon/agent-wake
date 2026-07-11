@@ -295,6 +295,46 @@ Checks performed:
 
 When suite.env is present, the doctor also reports regista connectivity.
 
+### Dossier human notifications
+
+Dossier's authenticated notification mode emits an HMAC-signed v0 wake event
+with `wake: false` and the destination principal in `meta.target`. Configure a
+dedicated source and explicitly allow its service identity and human targets:
+
+```json
+{
+  "version": 1,
+  "sources": {
+    "dossier": {
+      "secret_uris": ["env://DOSSIER_WAKE_SECRET"],
+      "allowed_trigger_identities": ["service:dossier"],
+      "allowed_target_principals": ["human:reviewer"]
+    }
+  },
+  "routing": {},
+  "delivery": {
+    "human:reviewer": {
+      "email": {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 587,
+        "from_addr": "agent-suite@example.com",
+        "to_addr": "reviewer@example.com",
+        "use_tls": true,
+        "secret_uri": "env://SMTP_PASSWORD"
+      }
+    }
+  }
+}
+```
+
+The dossier process uses the same secret through
+`DOSSIER_NOTIFICATION_SECRET_REF` (for example
+`env:DOSSIER_WAKE_SECRET`), sets `DOSSIER_NOTIFICATION_SOURCE=dossier`, and
+sets `DOSSIER_NOTIFICATION_IDENTITY=service:dossier`. Ingress authenticates
+the exact body, checks the service-identity allowlist, then checks the target
+allowlist before dispatching. The event remains eligible for human delivery
+without prompting an attached agent session.
+
 ### Install-harness (`agent-wake install-harness`)
 
 Wire wake adapters into harness configs (part of the suite bootstrap):

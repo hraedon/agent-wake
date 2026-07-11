@@ -26,6 +26,9 @@ _SMTP_TIMEOUT = 30
 
 _SUBJECT_TEMPLATES: dict[str, str] = {
     "awaiting_accept": "Action required: an item awaits your accept",
+    "awaiting_your_accept": "Action required: an item awaits your accept",
+    "review_requested": "Review requested",
+    "item_returned": "Changes requested: an item was returned",
     "digest": "Your agent-suite digest",
     "alert": "Alert: {content}",
     "chain_verify_failed": "Chain verification failed",
@@ -35,6 +38,24 @@ _SUBJECT_TEMPLATES: dict[str, str] = {
 _BODY_TEMPLATES: dict[str, str] = {
     "awaiting_accept": (
         "An item is awaiting your accept.\n\n"
+        "{content}\n\n"
+        "Deep link: {deep_link}\n\n"
+        "— agent-wake"
+    ),
+    "awaiting_your_accept": (
+        "An item is awaiting your accept.\n\n"
+        "{content}\n\n"
+        "Deep link: {deep_link}\n\n"
+        "— agent-wake"
+    ),
+    "review_requested": (
+        "A review was requested.\n\n"
+        "{content}\n\n"
+        "Deep link: {deep_link}\n\n"
+        "— agent-wake"
+    ),
+    "item_returned": (
+        "An item was returned for changes.\n\n"
         "{content}\n\n"
         "Deep link: {deep_link}\n\n"
         "— agent-wake"

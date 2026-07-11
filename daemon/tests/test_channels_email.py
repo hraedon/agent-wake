@@ -65,6 +65,29 @@ class TestRenderEmail:
         assert "WI-42 needs your accept" in body
         assert "https://suite/dossier" in body
 
+    def test_dossier_awaiting_your_accept_uses_action_required_subject(self):
+        event = _event(
+            kind="awaiting_your_accept", content="ITEM-42 needs your accept"
+        )
+        subject, body = render_email(event)
+        assert "action required" in subject.lower()
+        assert "ITEM-42 needs your accept" in body
+        assert "https://suite/dossier" in body
+
+    @pytest.mark.parametrize(
+        ("kind", "subject_fragment"),
+        [
+            ("review_requested", "review requested"),
+            ("item_returned", "changes requested"),
+        ],
+    )
+    def test_dossier_event_kinds_have_specific_templates(
+        self, kind: str, subject_fragment: str
+    ):
+        subject, body = render_email(_event(kind=kind, content="ITEM-42"))
+        assert subject_fragment in subject.lower()
+        assert "ITEM-42" in body
+
     def test_alert_subject_includes_content(self):
         event = _event(kind="alert", content="suite doctor went red")
         subject, _ = render_email(event)
