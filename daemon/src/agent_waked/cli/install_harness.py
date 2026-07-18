@@ -20,6 +20,10 @@ For agent-wake, the scope is the wake receiver adapter (daemon subscription):
   ``~/.hermes/plugins/signaling/wake/``. The plugin source lives in the repo at
   ``adapters/hermes/`` and is copied by install-harness.
 
+- **codex**: accepted as a suite harness target but returns an explicit
+  ``unsupported`` result until Plan 006's next-session adapter lands. It never
+  reports a successful no-op and never mutates Codex configuration.
+
 Idempotency: re-running on an already-wired profile is a no-op (exit 0).
 ``--uninstall`` removes only the entries this tool created, tracked by a
 sidecar manifest at ``~/.config/agent-wake/install-manifest.json``.
@@ -770,6 +774,18 @@ def _run_install(harness: str, dry_run: bool, uninstall: bool, user: str | None)
             actions = _wire_opencode(dry_run, uninstall, user)
         elif target == "hermes":
             actions = _wire_hermes(dry_run, uninstall, user)
+        elif target == "codex":
+            actions = [
+                {
+                    "kind": "unsupported",
+                    "path": "",
+                    "detail": (
+                        "Codex wake delivery is not implemented; Plan 006 "
+                        "permits only an honestly named next-session adapter "
+                        "until a supported live-wake API exists"
+                    ),
+                }
+            ]
         else:
             all_actions.append({"kind": "error", "path": "", "detail": f"unknown harness: {target}"})
             no_op = False
@@ -778,12 +794,27 @@ def _run_install(harness: str, dry_run: bool, uninstall: bool, user: str | None)
         if any(a["kind"] not in ("noop", "info") for a in actions):
             no_op = False
 
+    has_failure = any(
+        action["kind"] in ("error", "check_failed") for action in all_actions
+    )
+    has_unsupported = any(
+        action["kind"] == "unsupported" for action in all_actions
+    )
+    status = (
+        "failed"
+        if has_failure
+        else "unsupported"
+        if has_unsupported
+        else "installed"
+    )
+
     return {
         "tool": "agent-wake",
         "harness": harness,
         "user": user,
+        "status": status,
         "actions": all_actions,
-        "no_op": no_op,
+        "no_op": no_op and status == "installed",
     }
 
 
@@ -795,9 +826,13 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
         user=args.user,
     )
 
-    if args.dry_run:
+    if args.json or args.dry_run:
         print(json.dumps(result, indent=2))
+    if args.dry_run:
         return 2
+
+    if args.json:
+        return 0 if result["status"] == "installed" else 1
 
     # Human-readable summary
     for action in result["actions"]:
@@ -806,7 +841,7 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
         detail = action.get("detail", "")
         print(f"  {kind:12} {path}: {detail}")
 
-    has_error = any(a["kind"] in ("error", "check_failed") for a in result["actions"])
+    has_error = result["status"] in ("failed", "unsupported")
     if has_error:
         print("Install failed — see errors above.")
         return 1
@@ -826,7 +861,7 @@ def _build_install_harness_parser(sub: argparse._SubParsersAction[argparse.Argum
     )
     p.add_argument(
         "harness",
-        choices=["claude", "opencode", "hermes", "all"],
+        choices=["claude", "opencode", "codex", "hermes", "all"],
         help="Target harness to wire",
     )
     p.add_argument(
@@ -842,5 +877,10 @@ def _build_install_harness_parser(sub: argparse._SubParsersAction[argparse.Argum
     p.add_argument(
         "--user",
         help="Per-user wiring (writes principal_id into harness env block)",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the shared structured install-harness result",
     )
     p.set_defaults(func=_cmd_install_harness)
