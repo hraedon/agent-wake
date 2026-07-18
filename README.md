@@ -39,8 +39,10 @@ contracts:
 
 - **`agent-wake doctor --json`** — health check with the suite-shaped JSON
   output (`{component, version, ok, regista, checks}`)
-- **`agent-wake install-harness <claude|opencode|all>`** — wires adapters
-  into harness configs idempotently (part of the suite bootstrap)
+- **`agent-wake install-harness <claude|opencode|codex|all>`** — wires adapters
+  into harness configs idempotently (part of the suite bootstrap). `codex` is
+  currently accepted but returns an explicit non-zero `unsupported` result;
+  Plan 006 delivery work has not landed.
 - **Suite config** — reads `REGISTA_*` env vars from `suite.env` with the
   standard precedence chain
 - **Packaging** — systemd unit, Docker container, and Windows Service

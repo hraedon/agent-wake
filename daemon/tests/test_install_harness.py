@@ -425,6 +425,20 @@ def test_run_install_unknown_harness(isolated_home):
     assert any(a["kind"] == "error" for a in result["actions"])
 
 
+def test_run_install_codex_is_honestly_unsupported_and_non_noop(isolated_home):
+    result = _run_install("codex", dry_run=False, uninstall=False, user=None)
+    assert result["status"] == "unsupported"
+    assert result["no_op"] is False
+    assert result["actions"] == [
+        {
+            "kind": "unsupported",
+            "path": "",
+            "detail": result["actions"][0]["detail"],
+        }
+    ]
+    assert not isolated_home.manifest.exists()
+
+
 # ── no-clobber / --user / corrupted JSON ───────────────────────────────────────
 
 
