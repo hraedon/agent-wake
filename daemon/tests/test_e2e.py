@@ -98,6 +98,9 @@ async def test_e2e_wake_and_reply(tmp_path):
             **os.environ,
             secret_env: secret,
             "AGENT_WAKE_CONFIG": str(config_path),
+            # Isolate durable state per test: the daemon now persists dedupe /
+            # queue / dead-letter, and the default path is under the real $HOME.
+            "AGENT_WAKE_STATE_DIR": str(tmp_path / "state"),
         }
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -224,6 +227,9 @@ async def test_e2e_no_subscriber(tmp_path):
         **os.environ,
         secret_env: secret,
         "AGENT_WAKE_CONFIG": str(config_path),
+        # Isolate durable state per test: the daemon now persists dedupe /
+        # queue / dead-letter, and the default path is under the real $HOME.
+        "AGENT_WAKE_STATE_DIR": str(tmp_path / "state"),
     }
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -292,6 +298,9 @@ async def test_e2e_duplicate_event(tmp_path):
         **os.environ,
         secret_env: secret,
         "AGENT_WAKE_CONFIG": str(config_path),
+        # Isolate durable state per test: the daemon now persists dedupe /
+        # queue / dead-letter, and the default path is under the real $HOME.
+        "AGENT_WAKE_STATE_DIR": str(tmp_path / "state"),
     }
     proc = await asyncio.create_subprocess_exec(
         sys.executable,

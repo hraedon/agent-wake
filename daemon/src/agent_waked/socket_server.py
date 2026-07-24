@@ -187,6 +187,15 @@ class SocketServer:
             return
 
         assert conn is not None
+        # Next-session delivery (Plan 006 Phase 1): the handshake is the
+        # "session start" signal, so anything queued for this subscriber's
+        # sources is handed over before the frame loop begins. Failures here
+        # must not kill an otherwise healthy connection — the rows stay queued.
+        try:
+            await self._router.drain_pending(session_id)
+        except Exception:
+            log.exception("drain_pending failed session_id=%s", session_id)
+
         try:
             await self._frame_loop(conn)
         except ConnectionError:

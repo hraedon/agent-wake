@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .router import Router
     from .secrets.resolver import SecretResolver
     from .socket_server import SocketServer
+    from .store import WakeStore
 
 log = logging.getLogger("agent_waked.ingest")
 
@@ -55,14 +56,34 @@ class UnsupportedVersionError(ValueError):
 
 
 class Dedupe:
-    """In-memory 4096-id FIFO dedupe window."""
+    """Replay window over ``event_id``.
 
-    def __init__(self, max_size: int = 4096):
+    Two backings:
+
+    * **durable** — when a :class:`~agent_waked.store.WakeStore` is supplied,
+      every check is a single atomic ``INSERT OR IGNORE`` against the store's
+      ``dedupe`` table.  The window therefore survives a daemon restart, which
+      is the whole point of BC-WAKE-004: before this, killing the daemon
+      re-admitted every replay the sender still held.  Retention and bounding
+      are the store's job (TTL + row cap, see ``store.prune``).
+    * **in-memory 4096-id FIFO** — the v0 behaviour, retained as the fallback
+      when no store is configured (unit tests that build the app directly, and
+      any deployment that deliberately opts out of on-disk state).
+    """
+
+    def __init__(self, max_size: int = 4096, store: "WakeStore | None" = None):
         self._seen: set[str] = set()
         self._order: deque[str] = deque(maxlen=max_size)
         self._max = max_size
+        self._store = store
 
-    def check(self, event_id: str) -> bool:
+    @property
+    def durable(self) -> bool:
+        return self._store is not None
+
+    def check(self, event_id: str, source: str = "") -> bool:
+        if self._store is not None:
+            return self._store.check_and_record_event(event_id, source)
         if event_id in self._seen:
             return True
         if len(self._order) == self._max:
@@ -134,8 +155,9 @@ def create_ingest_app(
     version: str = "0.1.0",
     resolver: "SecretResolver | None" = None,
     delivery: "HumanDelivery | None" = None,
+    store: "WakeStore | None" = None,
 ) -> web.Application:
-    dedupe = Dedupe()
+    dedupe = Dedupe(store=store)
 
     async def post_root(request: web.Request) -> web.Response:
         raw_body = await request.read()
@@ -206,7 +228,7 @@ def create_ingest_app(
         if principal_id:
             event.setdefault("meta", {})["trigger_identity"] = principal_id
 
-        if dedupe.check(event_id):
+        if dedupe.check(event_id, source):
             return _json_response(202, {"status": "duplicate", "event_id": event_id})
 
         delivery_result: dict[str, Any] | None = None
@@ -263,9 +285,12 @@ def create_ingest_app(
                 }
 
         result = await router.deliver(event)
-        if result == "no_subscriber":
+        if result in ("no_subscriber", "queued_next_session"):
+            # ``queued_next_session``: no live session accepted the event, but
+            # durable delivery was requested, so the daemon has persisted it and
+            # will hand it to the next session that subscribes for this source.
             response: dict[str, Any] = {
-                "status": "no_subscriber",
+                "status": result,
                 "event_id": event_id,
             }
             if delivery_result is not None:
@@ -286,6 +311,12 @@ def create_ingest_app(
             body["adapters"] = len(socket_server.connections)
         if delivery is not None:
             body["delivery"] = delivery.health.summary()
+        if store is not None:
+            body["store"] = {
+                "durable": True,
+                "pending": store.pending_count(),
+                "dead_letter": store.dead_letter_count(),
+            }
         return _json_response(200, body)
 
     app = web.Application()

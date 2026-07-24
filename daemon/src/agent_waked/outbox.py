@@ -4,16 +4,22 @@ Spec reference: v1-daemon-spec.md §8.
 
 Wraps an ``aiohttp.ClientSession`` used to POST v0 reply objects to
 per-source callback URLs.  Retries up to 3 times with exponential
-backoff (1s / 4s / 16s).  On permanent failure, logs at warning level.
+backoff (1s / 4s / 16s).  On permanent failure the reply is **dead-lettered**
+into the durable store (BC-WAKE-012) so an operator can list, inspect and
+redrive it — previously the retries were exhausted and the reply was lost with
+nothing but a warning line.
 """
 
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession, ClientTimeout
+
+if TYPE_CHECKING:
+    from .store import WakeStore
 
 log = logging.getLogger("agent_waked.outbox")
 
@@ -37,11 +43,40 @@ class Outbox:
         config: dict[str, Any],
         max_retries: int = _MAX_RETRIES,
         backoff_delays: tuple[float, ...] = _BACKOFF_DELAYS,
+        store: "WakeStore | None" = None,
     ):
         self._config = config
         self._session: ClientSession | None = None
         self._max_retries = max_retries
         self._backoff_delays = backoff_delays
+        self._store = store
+
+    def _dead_letter(
+        self,
+        *,
+        source: str,
+        reply_id: str,
+        in_reply_to: str,
+        content: str,
+        error: str | None,
+        attempts: int,
+    ) -> str | None:
+        """Persist a permanently-failed reply for operator redrive."""
+        if self._store is None:
+            return None
+        return self._store.dead_letter(
+            kind="reply",
+            source=source,
+            ref_id=reply_id,
+            payload={
+                "source": source,
+                "reply_id": reply_id,
+                "in_reply_to": in_reply_to,
+                "content": content,
+            },
+            error=error,
+            attempts=attempts,
+        )
 
     async def start(self) -> None:
         self._session = ClientSession(timeout=_REPLY_TIMEOUT)
@@ -87,6 +122,14 @@ class Outbox:
                 reply_id,
                 callback_url,
                 url_err,
+            )
+            self._dead_letter(
+                source=source,
+                reply_id=reply_id,
+                in_reply_to=in_reply_to,
+                content=content,
+                error=url_err,
+                attempts=0,
             )
             return {
                 "reply_id": reply_id,
@@ -176,9 +219,20 @@ class Outbox:
             reply_id,
             last_error,
         )
-        return {
+        dead_letter_id = self._dead_letter(
+            source=source,
+            reply_id=reply_id,
+            in_reply_to=in_reply_to,
+            content=content,
+            error=last_error,
+            attempts=self._max_retries,
+        )
+        result: dict[str, Any] = {
             "reply_id": reply_id,
             "status": "failed",
             "http_status": last_http_status,
             "error": last_error,
         }
+        if dead_letter_id is not None:
+            result["dead_letter_id"] = dead_letter_id
+        return result

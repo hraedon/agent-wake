@@ -25,6 +25,7 @@ from .outbox import Outbox
 from .router import Router
 from .secrets.resolver import SecretResolver
 from .socket_server import SocketServer
+from .store import StoreError, WakeStore, open_store
 
 log = logging.getLogger("agent_waked")
 
@@ -257,12 +258,41 @@ async def _run() -> int:
     explicit_bind = bool(os.environ.get("AGENT_WAKE_LISTEN_HOST"))
     _warn_non_loopback_bind(host, cfg, explicit=explicit_bind)
 
-    router = Router(cfg)
+    # Durable state (BC-WAKE-004/012): dedupe window, next-session queue and
+    # dead-letter live in one SQLite file. Opening it is a few milliseconds and
+    # runs the retention sweep once, so startup stays fast. A store that cannot
+    # be opened degrades to the in-memory v0 behaviour rather than refusing to
+    # start — signalling is more valuable than durability when the disk is
+    # unhappy, and the degradation is logged loudly.
+    store: WakeStore | None = None
+    if (cfg.get("state") or {}).get("enabled", True):
+        try:
+            store = open_store(cfg)
+            log.info(
+                "durable store at %s (dedupe=%d pending=%d dead_letter=%d)",
+                store.path,
+                store.dedupe_count(),
+                store.pending_count(),
+                store.dead_letter_count(),
+            )
+        except StoreError:
+            log.exception(
+                "durable store unavailable; falling back to in-memory dedupe "
+                "(replays are re-admitted after restart, next-session delivery off)"
+            )
+            store = None
+    else:
+        log.warning(
+            "durable store disabled by config (state.enabled=false): dedupe is "
+            "in-memory only and next-session delivery is unavailable"
+        )
+
+    router = Router(cfg, store=store)
     resolver = SecretResolver(vault_cfg=cfg.get("vault"))
 
     delivery = HumanDelivery(cfg, resolver)
 
-    outbox = Outbox(cfg)
+    outbox = Outbox(cfg, store=store)
     await outbox.start()
 
     socket_server = SocketServer(sock_path, router, outbox=outbox)
@@ -275,6 +305,7 @@ async def _run() -> int:
         version=_VERSION,
         resolver=resolver,
         delivery=delivery,
+        store=store,
     )
     runner = web.AppRunner(app)
     try:
@@ -319,6 +350,8 @@ async def _run() -> int:
     socket_server.close()
     await outbox.close()
     await delivery.close()
+    if store is not None:
+        store.close()
     try:
         await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
     except asyncio.TimeoutError:

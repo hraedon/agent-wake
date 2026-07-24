@@ -297,3 +297,110 @@ async def test_reply_unknown_source_no_callback():
     await ob.close()
 
     assert result["status"] == "no_callback"
+
+
+# ── dead-letter (BC-WAKE-012) ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_is_dead_lettered(tmp_path):
+    """A reply whose callback never recovers must survive as an inspectable row.
+
+    Before this, the retries were exhausted and the reply left nothing but a
+    log line — there was no way for an operator to see or resend it.
+    """
+    from agent_waked.store import WakeStore
+
+    async def handler(request):
+        return web.json_response({"nope": True}, status=500)
+
+    app = web.Application()
+    app.router.add_post("/callback", handler)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    store = WakeStore(tmp_path / "state.db")
+    try:
+        cfg = _config(callback_url=str(cli.make_url("/callback")))
+        ob = Outbox(cfg, max_retries=2, backoff_delays=(0.0,), store=store)
+        await ob.start()
+        result = await ob.deliver(
+            source="github-actions",
+            reply_id="rpl-dl",
+            in_reply_to="evt-dl",
+            content="never lands",
+        )
+        await ob.close()
+
+        assert result["status"] == "failed"
+        entries = store.list_dead_letters(kind="reply")
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.id == result["dead_letter_id"]
+        assert entry.ref_id == "rpl-dl"
+        assert entry.source == "github-actions"
+        assert entry.attempts == 2
+        assert entry.error == "HTTP 500"
+        # The payload carries everything a redrive needs.
+        assert entry.payload == {
+            "source": "github-actions",
+            "reply_id": "rpl-dl",
+            "in_reply_to": "evt-dl",
+            "content": "never lands",
+        }
+    finally:
+        await cli.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_url_is_dead_lettered(tmp_path):
+    from agent_waked.store import WakeStore
+
+    store = WakeStore(tmp_path / "state.db")
+    try:
+        cfg = _config(callback_url="file:///etc/passwd")
+        ob = Outbox(cfg, store=store)
+        await ob.start()
+        result = await ob.deliver(
+            source="github-actions",
+            reply_id="rpl-bad-url",
+            in_reply_to="evt-1",
+            content="x",
+        )
+        await ob.close()
+        assert result["status"] == "rejected"
+        assert store.dead_letter_count() == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_no_callback_is_not_dead_lettered(tmp_path):
+    """"Nobody asked for a reply" is not a failure; it must not fill the queue."""
+    from agent_waked.store import WakeStore
+
+    store = WakeStore(tmp_path / "state.db")
+    try:
+        ob = Outbox(_config(), store=store)
+        await ob.start()
+        result = await ob.deliver(
+            source="no-cb", reply_id="r", in_reply_to="e", content="x"
+        )
+        await ob.close()
+        assert result["status"] == "no_callback"
+        assert store.dead_letter_count() == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_outbox_without_store_keeps_v0_shape():
+    cfg = _config(callback_url="file:///etc/passwd")
+    ob = Outbox(cfg)
+    await ob.start()
+    result = await ob.deliver(
+        source="github-actions", reply_id="r", in_reply_to="e", content="x"
+    )
+    await ob.close()
+    assert result["status"] == "rejected"
+    assert "dead_letter_id" not in result

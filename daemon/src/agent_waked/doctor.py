@@ -295,6 +295,52 @@ def _check_regista() -> dict[str, Any] | None:
 # ── doctor runner ──────────────────────────────────────────────────────────────
 
 
+def _check_durable_state() -> tuple[str, str]:
+    """Check: the durable store is openable, and surface the dead-letter backlog.
+
+    A non-empty dead-letter table is the operator-visible half of BC-WAKE-012:
+    deliveries that permanently failed are no longer invisible, so the doctor
+    reports them as a warning with the command that lists them.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+
+    if not (cfg.get("state") or {}).get("enabled", True):
+        return "warn", (
+            "durable store disabled (state.enabled=false): dedupe is in-memory "
+            "only and next-session delivery is unavailable"
+        )
+
+    from .store import StoreError, open_store, resolve_state_path
+
+    path = resolve_state_path(cfg)
+    if not path.exists():
+        return "skip", (
+            f"no durable state yet at {path} (created on first daemon start)"
+        )
+    try:
+        store = open_store(cfg)
+    except StoreError as e:
+        return "fail", f"durable store unusable: {e}"
+    try:
+        dead = store.dead_letter_count()
+        pending = store.pending_count()
+        dedupe = store.dedupe_count()
+    finally:
+        store.close()
+
+    detail = (
+        f"dedupe={dedupe} pending={pending} dead_letter={dead}"
+    )
+    if dead:
+        return "warn", (
+            f"{detail}; inspect with `agent-wake dead-letter list`"
+        )
+    return "ok", detail
+
+
 def run_checks() -> dict[str, Any]:
     """Run all health checks and return the suite-shaped doctor JSON."""
     checks: list[dict[str, str]] = []
@@ -306,6 +352,7 @@ def run_checks() -> dict[str, Any]:
         ("adapters_installed", _check_adapters_installed),
         ("allowlist_present", _check_allowlist_present),
         ("delivery_health", _check_delivery_health),
+        ("durable_state", _check_durable_state),
     ]:
         status, detail = fn()
         checks.append({"name": name, "status": status, "detail": detail})

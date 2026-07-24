@@ -196,6 +196,9 @@ async def test_sighup_new_source_addressable(tmp_path):
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "agent_waked",
         env={**os.environ, **env, "AGENT_WAKE_CONFIG": str(config_path),
+             # Isolate durable state per test: the daemon now persists dedupe /
+             # queue / dead-letter, and the default path is under the real $HOME.
+             "AGENT_WAKE_STATE_DIR": str(tmp_path / "state"),
              # Prevent host env overrides from changing the bind the test
              # asserts against (main.resolve_listen honors these).
              "AGENT_WAKE_LISTEN_HOST": "",
@@ -302,6 +305,7 @@ async def test_sighup_port_change_old_port_stays_bound(tmp_path):
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "agent_waked",
         env={**os.environ, **env, "AGENT_WAKE_CONFIG": str(config_path),
+             "AGENT_WAKE_STATE_DIR": str(tmp_path / "state"),
              "AGENT_WAKE_LISTEN_HOST": "",
              "AGENT_WAKE_LISTEN_PORT": ""},
         stdout=asyncio.subprocess.PIPE,

@@ -569,3 +569,105 @@ async def test_delivery_unauthorized_source_403():
         assert len(delivered) == 0
     finally:
         await cli.close()
+
+
+# ── durable dedupe across a daemon restart (BC-WAKE-004) ─────────────────────
+
+
+def _wake_body(event_id: str) -> bytes:
+    return json.dumps(
+        {
+            "v": 0,
+            "event_id": event_id,
+            "source": "test",
+            "kind": "webhook",
+            "content": "payload",
+            "meta": {},
+            "wake": True,
+        }
+    ).encode()
+
+
+async def _post_once(store, body: bytes) -> dict:
+    """Start a fresh ingest app against *store*, POST *body*, tear it down.
+
+    Each call stands in for one daemon lifetime: a brand-new app, router and
+    Dedupe over the same on-disk store.
+    """
+    app = create_ingest_app(_config(), MockRouter(), store=store)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        resp = await cli.post(
+            "/",
+            data=body,
+            headers={
+                "X-AgentWake-Source": "test",
+                "X-AgentWake-Signature": _hmac(b"shhh", body),
+            },
+        )
+        assert resp.status == 202
+        return await resp.json()
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_rejected_across_daemon_restart(tmp_path):
+    """AC (WI-A): a replay is rejected even after the daemon process dies.
+
+    Before BC-WAKE-004 was closed, ``Dedupe`` was an in-memory FIFO, so the
+    second POST here — issued against a fresh app after the store was closed
+    and reopened — was admitted as brand new.
+    """
+    from agent_waked.store import WakeStore
+
+    db = tmp_path / "state.db"
+    body = _wake_body("ev-replay-1")
+
+    store = WakeStore(db)
+    first = await _post_once(store, body)
+    assert first["status"] == "queued"
+    store.close()  # daemon dies
+
+    store2 = WakeStore(db)  # daemon restarts, same state file
+    try:
+        second = await _post_once(store2, body)
+        assert second["status"] == "duplicate"
+        assert second["event_id"] == "ev-replay-1"
+    finally:
+        store2.close()
+
+
+@pytest.mark.asyncio
+async def test_in_memory_dedupe_is_lost_across_restart():
+    """The documented v0 fallback: no store means no durability.
+
+    This is the control for the test above — it pins *why* the store is
+    required rather than leaving the durable path untestable.
+    """
+    body = _wake_body("ev-replay-2")
+    first = await _post_once(None, body)
+    assert first["status"] == "queued"
+    second = await _post_once(None, body)
+    assert second["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_health_reports_store_counters(tmp_path):
+    from agent_waked.store import WakeStore
+
+    store = WakeStore(tmp_path / "state.db")
+    store.dead_letter(kind="reply", source="test", ref_id="r1", payload={})
+    app = create_ingest_app(_config(), MockRouter(), store=store)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        resp = await cli.get("/")
+        body = await resp.json()
+        assert body["store"] == {"durable": True, "pending": 0, "dead_letter": 1}
+    finally:
+        await cli.close()
+        store.close()
