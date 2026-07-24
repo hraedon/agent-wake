@@ -80,6 +80,32 @@ curl -s -X POST http://127.0.0.1:8788/ \
   -d "$BODY"
 ```
 
+## Silent inject (`wake: false`)
+
+Claude Code's channel protocol has no `noReply` equivalent: `params` is exactly
+`{content, meta}`, and an event delivered to an idle session starts a turn. It
+does, however, guarantee that notifications arriving while Claude is busy are
+"delivered together on the next turn".
+
+So this adapter implements silent inject as **deferred inject**. A `wake: false`
+event is buffered (never dropped, and still acked to the daemon) and emitted at
+the next moment a turn is provably already happening:
+
+- immediately before the next `wake: true` event — that turn is happening anyway;
+- on a `tools/call` request, which Claude can only issue mid-turn;
+- on a permission relay request, which only fires mid-turn.
+
+Flushed events carry `silent="true"`, `flush_reason="..."` and `deferred_ms` as
+`<channel>` attributes, so the model can tell context from a fresh alert.
+
+The limitation, stated plainly: if silent events keep arriving and no turn ever
+happens, the buffer would grow without bound. At 64 buffered events the adapter
+flushes anyway and *does* wake the session, tagged `flush_reason="overflow"`.
+
+All of this is declared machine-readably on `initialize` under
+`capabilities.experimental["agent-wake/silent_inject"]` — mode, reason,
+flush triggers, overflow behaviour, and `drops_events: false`.
+
 ## Reply tool
 
 The adapter exposes a single MCP tool: `agent_wake_reply`.

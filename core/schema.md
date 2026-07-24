@@ -83,6 +83,15 @@
 - **`wake`** — `true` triggers an agent turn. `false` injects context silently
   (useful for "FYI" events that do not need immediate response).
 
+  Silent inject is per-harness in *mechanism*, not in *guarantee*. opencode
+  maps it directly onto `session.promptAsync({ noReply: true })`. Claude Code's
+  channel protocol has no equivalent flag, so its adapter **defers** the event
+  and emits it once a turn is already underway — the same observable outcome
+  (context arrives without having triggered a turn), reached differently. An
+  adapter MUST NOT drop a `wake: false` event; if it cannot honour the mode it
+  MUST declare the limitation machine-readably (the Claude adapter does so
+  under `capabilities.experimental["agent-wake/silent_inject"]`).
+
 ### Retry and idempotency semantics
 
 The HTTP ingest layer is modeled on the Stripe / GitHub webhook pattern.
@@ -90,8 +99,10 @@ Senders SHOULD treat the ingest endpoint as best-effort and retry with
 exponential backoff on non-2xx responses or connection failures (suggested:
 3 retries over 60 seconds, then surface the failure to the operator).
 
-The adapter SHOULD deduplicate by `event_id` within a recent-events window
-(suggested: 4096 most-recent ids in memory; no persistence in v0). A duplicate
+The daemon deduplicates by `event_id` within a bounded, **durable** window
+(SQLite-backed; TTL + row cap), so a replay is rejected across daemon
+restarts. An adapter with no daemon in front of it SHOULD deduplicate within a
+recent-events window of its own (suggested: 4096 most-recent ids in memory). A duplicate
 `event_id` returns 202 with `{"status": "duplicate"}` and does NOT wake the
 agent a second time. This makes the ingest endpoint safe for at-least-once
 delivery.
