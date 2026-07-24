@@ -51,6 +51,11 @@ def _build_secrets_parser(sub: argparse._SubParsersAction[argparse.ArgumentParse
 
     # --- list ---
     list_p = secrets_sub.add_parser("list", help="List all sources (no secret values)")
+    list_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit sources as a JSON document (no secret material)",
+    )
 
     # --- add ---
     add_p = secrets_sub.add_parser("add", help="Add a secret for a new source")
@@ -107,12 +112,10 @@ def _config_path() -> Path:
 def _load_raw_config() -> dict[str, Any]:
     path = _config_path()
     if not path.exists():
-        print(
-            f"Error: config file not found at {path}.\n"
-            "Run 'agent-wake init' to create one (future feature).",
-            file=sys.stderr,
+        raise ConfigError(
+            f"config file not found at {path}. "
+            "Run 'agent-wake init' to create one (future feature)."
         )
-        sys.exit(1)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)  # type: ignore[no-any-return]
 
@@ -256,40 +259,50 @@ def _env_file_remove_line(var_name: str) -> None:
 # ── commands ──────────────────────────────────────────────────────────────────
 
 
+def _summarize_sources(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build a per-source summary (backend, count, URIs) with no secret material."""
+    rows: list[dict[str, Any]] = []
+    for name, info in sorted(sources.items()):
+        if not isinstance(info, dict):
+            continue
+        if "secret_env" in info:
+            backend = "env"
+            uris = [f"env://{info['secret_env']}"]
+        elif "secret" in info:
+            uri = info["secret"]
+            backend = "env" if uri.startswith("env://") else "vault"
+            uris = [uri]
+        elif "secrets" in info:
+            uris_list: list[str] = info["secrets"]
+            backend = "env" if uris_list and uris_list[0].startswith("env://") else "vault"
+            uris = uris_list
+        else:
+            backend = "unknown"
+            uris = []
+        rows.append({"source": name, "backend": backend, "n_secrets": len(uris), "secret_uris": uris})
+    return rows
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     raw = _load_raw_config()
     sources: dict[str, Any] = raw.get("sources", {})
+
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "sources": _summarize_sources(sources)}, indent=2))
+        return 0
+
     if not sources:
         print("No sources configured.")
         return 0
 
     print(f"{'SOURCE':<20}  {'BACKEND':<8}  {'N_SECRETS':<10}  SECRET_URIS")
     print("-" * 70)
-    for name, info in sorted(sources.items()):
-        if not isinstance(info, dict):
-            continue
-        if "secret_env" in info:
-            backend = "env"
-            n = 1
-            uris = [f"env://{info['secret_env']}"]
-        elif "secret" in info:
-            uri = info["secret"]
-            backend = "env" if uri.startswith("env://") else "vault"
-            n = 1
-            uris = [uri]
-        elif "secrets" in info:
-            uris_list: list[str] = info["secrets"]
-            backend = "env" if uris_list and uris_list[0].startswith("env://") else "vault"
-            n = len(uris_list)
-            uris = uris_list
-        else:
-            backend = "unknown"
-            n = 0
-            uris = []
+    for row in _summarize_sources(sources):
+        uris = row["secret_uris"]
         uri_display = ", ".join(uris[:2])
-        if n > 2:
-            uri_display += f" (+{n-2} more)"
-        print(f"{name:<20}  {backend:<8}  {n:<10}  {uri_display}")
+        if row["n_secrets"] > 2:
+            uri_display += f" (+{row['n_secrets']-2} more)"
+        print(f"{row['source']:<20}  {row['backend']:<8}  {row['n_secrets']:<10}  {uri_display}")
     return 0
 
 

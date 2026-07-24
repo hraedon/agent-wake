@@ -28,6 +28,12 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "mypy>=1.10",
+    # CLI contract v1 conformance kit (Plan 018 WI-2 / Plan 019 B3). A published
+    # PyPI wheel that requires py>=3.12, so it is installed only on the 3.12 lane
+    # (the daemon still supports 3.11 at runtime; the conformance test skips there
+    # via importorskip). Consumed only by tests/test_cli_conformance.py, never
+    # imported by runtime code.
+    "agent-suite-conformance==1.0.0; python_version >= '3.12'",
 ]
 
 [tool.pytest.ini_options]
