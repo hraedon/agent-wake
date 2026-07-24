@@ -296,3 +296,71 @@ def test_routing_not_object_raises_config_error(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
     with pytest.raises(ConfigError, match="'routing' must be an object"):
         load_config()
+
+
+# ── state block (durable store: BC-WAKE-004 / BC-WAKE-012) ───────────────────
+
+
+def _state_cfg(tmp_path, monkeypatch, state):
+    monkeypatch.setenv("ST_SEC", "x")
+    cfg_path = tmp_path / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "ST_SEC"}},
+        "routing": {},
+    }
+    if state is not None:
+        body["state"] = state
+    _write_config(cfg_path, body)
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    return cfg_path
+
+
+def test_state_block_absent_defaults_to_empty(tmp_path, monkeypatch):
+    _state_cfg(tmp_path, monkeypatch, None)
+    cfg = load_config()
+    assert cfg["state"] == {}
+
+
+def test_state_block_normalised(tmp_path, monkeypatch):
+    _state_cfg(tmp_path, monkeypatch, {
+        "dir": "/var/lib/agent-wake",
+        "dedupe_max_rows": 50,
+        "default_delivery": "next_session",
+    })
+    cfg = load_config()
+    assert cfg["state"]["dir"] == "/var/lib/agent-wake"
+    assert cfg["state"]["dedupe_max_rows"] == 50
+    assert cfg["state"]["default_delivery"] == "next_session"
+    assert cfg["state"]["enabled"] is True
+
+
+def test_state_block_rejects_bad_delivery_mode(tmp_path, monkeypatch):
+    _state_cfg(tmp_path, monkeypatch, {"default_delivery": "teleport"})
+    with pytest.raises(ConfigError, match="default_delivery"):
+        load_config()
+
+
+def test_state_block_rejects_non_positive_retention(tmp_path, monkeypatch):
+    _state_cfg(tmp_path, monkeypatch, {"dedupe_max_rows": 0})
+    with pytest.raises(ConfigError, match="must be a positive integer"):
+        load_config()
+
+
+def test_state_block_rejects_bool_retention(tmp_path, monkeypatch):
+    """bool is an int subclass; ``dedupe_max_rows: true`` must not slip through."""
+    _state_cfg(tmp_path, monkeypatch, {"pending_max_attempts": True})
+    with pytest.raises(ConfigError, match="must be a positive integer"):
+        load_config()
+
+
+def test_state_block_must_be_object(tmp_path, monkeypatch):
+    _state_cfg(tmp_path, monkeypatch, "nope")
+    with pytest.raises(ConfigError, match="'state' must be an object"):
+        load_config()
+
+
+def test_state_can_be_disabled(tmp_path, monkeypatch):
+    _state_cfg(tmp_path, monkeypatch, {"enabled": False})
+    assert load_config()["state"]["enabled"] is False

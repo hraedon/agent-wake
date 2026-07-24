@@ -1,0 +1,569 @@
+"""Durable daemon state: dedupe window, next-session queue, dead-letter.
+
+Spec reference: v1-daemon-spec.md §7 (dedupe), §8 (outbox), Plan 006 Phase 1
+(next-session delivery).  Closes BC-WAKE-004 (dedupe lost on restart) and
+BC-WAKE-012 (no durable redelivery / no dead-letter visibility).
+
+Why SQLite
+----------
+The daemon had *no* persistence at all before this module: dedupe was an
+in-memory FIFO and the outbox retried in-process and then logged.  The
+requirement is a store that (a) survives a daemon restart, (b) is readable
+by a *separate* operator CLI process while the daemon holds it open, and
+(c) adds no dependency.  ``sqlite3`` is in the stdlib, gives us atomic
+commits and cross-process reads under WAL, and opens in about a millisecond
+— so the daemon startup path stays fast.  Anything heavier (regista /
+Postgres) would make the daemon's core loop depend on a service that
+AGENTS.md explicitly says must stay optional.
+
+Concurrency
+-----------
+All calls are synchronous.  Each operation is a single indexed statement on
+a local file, i.e. tens of microseconds; wrapping them in a thread executor
+would cost more than it saves.  The connection is created with
+``check_same_thread=False`` and every statement is taken under a
+``threading.Lock`` so the CLI's short-lived connection and the daemon's
+long-lived one cannot interleave a transaction.
+
+Retention
+---------
+The dedupe table is bounded twice over: rows older than ``dedupe_ttl_seconds``
+are dropped, and if the table still exceeds ``dedupe_max_rows`` the oldest
+rows above the cap are dropped.  Pruning runs on open and then amortised
+every ``_PRUNE_INTERVAL`` inserts, so no single ingest pays the full cost.
+Pending (next-session) rows expire after ``pending_ttl_seconds`` and are
+moved to the dead-letter table rather than deleted, so an event is never
+lost silently.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ulid import ULID
+
+log = logging.getLogger("agent_waked.store")
+
+SCHEMA_VERSION = 1
+
+DEFAULT_DEDUPE_TTL_SECONDS = 7 * 24 * 3600
+DEFAULT_DEDUPE_MAX_ROWS = 100_000
+DEFAULT_PENDING_TTL_SECONDS = 7 * 24 * 3600
+DEFAULT_PENDING_MAX_ROWS = 10_000
+DEFAULT_PENDING_MAX_ATTEMPTS = 5
+
+# Amortised pruning: run the retention sweep once every N dedupe inserts.
+_PRUNE_INTERVAL = 256
+
+DEAD_LETTER_KINDS = ("reply", "next_session")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dedupe (
+    event_id TEXT PRIMARY KEY,
+    source   TEXT NOT NULL,
+    seen_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dedupe_seen_at ON dedupe(seen_at);
+
+CREATE TABLE IF NOT EXISTS pending (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    TEXT NOT NULL UNIQUE,
+    source      TEXT NOT NULL,
+    target      TEXT,
+    event_json  TEXT NOT NULL,
+    enqueued_at REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pending_source ON pending(source);
+CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending(expires_at);
+
+CREATE TABLE IF NOT EXISTS dead_letter (
+    id             TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    ref_id         TEXT NOT NULL,
+    payload_json   TEXT NOT NULL,
+    error          TEXT,
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    created_at     REAL NOT NULL,
+    redriven_at    REAL,
+    redrive_status TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_created ON dead_letter(created_at);
+"""
+
+
+class StoreError(Exception):
+    """Raised when the durable store cannot be opened or migrated."""
+
+
+@dataclass(frozen=True)
+class PendingEvent:
+    """One queued next-session event."""
+
+    row_id: int
+    event_id: str
+    source: str
+    target: str | None
+    event: dict[str, Any]
+    enqueued_at: float
+    expires_at: float
+    attempts: int
+
+
+@dataclass(frozen=True)
+class DeadLetter:
+    """One dead-lettered delivery."""
+
+    id: str
+    kind: str
+    source: str
+    ref_id: str
+    payload: dict[str, Any]
+    error: str | None
+    attempts: int
+    created_at: float
+    redriven_at: float | None
+    redrive_status: str | None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "source": self.source,
+            "ref_id": self.ref_id,
+            "payload": self.payload,
+            "error": self.error,
+            "attempts": self.attempts,
+            "created_at": self.created_at,
+            "redriven_at": self.redriven_at,
+            "redrive_status": self.redrive_status,
+        }
+
+
+DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "agent-wake"
+STATE_DB_NAME = "state.db"
+
+
+def resolve_state_path(cfg: dict[str, Any] | None = None) -> Path:
+    """Resolve the state database path.
+
+    Precedence: ``AGENT_WAKE_STATE_DIR`` env override (used by the container
+    and by tests) > ``cfg["state"]["dir"]`` > ``~/.local/state/agent-wake``.
+    Mirrors ``main._resolve_socket_path`` so operators only have one mental
+    model for daemon-owned local state.
+    """
+    env_dir = os.environ.get("AGENT_WAKE_STATE_DIR")
+    if env_dir:
+        return Path(env_dir) / STATE_DB_NAME
+    if cfg:
+        state_cfg = cfg.get("state") or {}
+        explicit = state_cfg.get("dir")
+        if explicit:
+            return Path(str(explicit)) / STATE_DB_NAME
+    return DEFAULT_STATE_DIR / STATE_DB_NAME
+
+
+class WakeStore:
+    """Durable dedupe / next-session queue / dead-letter store."""
+
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        dedupe_ttl_seconds: float = DEFAULT_DEDUPE_TTL_SECONDS,
+        dedupe_max_rows: int = DEFAULT_DEDUPE_MAX_ROWS,
+        pending_ttl_seconds: float = DEFAULT_PENDING_TTL_SECONDS,
+        pending_max_rows: int = DEFAULT_PENDING_MAX_ROWS,
+        pending_max_attempts: int = DEFAULT_PENDING_MAX_ATTEMPTS,
+    ):
+        self.path = Path(path)
+        self.dedupe_ttl_seconds = float(dedupe_ttl_seconds)
+        self.dedupe_max_rows = int(dedupe_max_rows)
+        self.pending_ttl_seconds = float(pending_ttl_seconds)
+        self.pending_max_rows = int(pending_max_rows)
+        self.pending_max_attempts = int(pending_max_attempts)
+
+        self._lock = threading.Lock()
+        self._inserts_since_prune = 0
+
+        if str(self.path) != ":memory:":
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            except OSError as exc:
+                raise StoreError(f"cannot create state dir {self.path.parent}: {exc}") from exc
+        try:
+            self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        except sqlite3.Error as exc:
+            raise StoreError(f"cannot open state db {self.path}: {exc}") from exc
+        self._conn.row_factory = sqlite3.Row
+        try:
+            # WAL lets the operator CLI read while the daemon holds the db open.
+            # ``:memory:`` databases reject WAL; ignore the failure there.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            raise StoreError(f"cannot initialise state db {self.path}: {exc}") from exc
+
+        if str(self.path) != ":memory:":
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
+
+        self.prune()
+
+    # ── lifecycle ────────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+
+    # ── dedupe ───────────────────────────────────────────────────────────────
+
+    def check_and_record_event(self, event_id: str, source: str = "") -> bool:
+        """Return True if *event_id* was already seen; otherwise record it.
+
+        Durable: the answer is the same after a daemon restart, which is the
+        whole point (BC-WAKE-004).  The insert and the check are one atomic
+        statement — ``INSERT OR IGNORE`` plus ``rowcount`` — so two concurrent
+        ingests of the same id cannot both be admitted.
+        """
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO dedupe (event_id, source, seen_at) VALUES (?, ?, ?)",
+                (event_id, source, now),
+            )
+            self._conn.commit()
+            inserted = cur.rowcount == 1
+            self._inserts_since_prune += 1
+            due = self._inserts_since_prune >= _PRUNE_INTERVAL
+        if due:
+            self.prune()
+        return not inserted
+
+    def dedupe_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM dedupe").fetchone()
+        return int(row["n"])
+
+    # ── next-session queue ───────────────────────────────────────────────────
+
+    def enqueue_pending(self, event: dict[str, Any]) -> bool:
+        """Queue *event* for delivery at the next session for its source.
+
+        Returns False if the event_id is already queued (the queue is
+        idempotent on event_id, matching dedupe) or if the queue is full.
+        """
+        event_id = str(event.get("event_id", ""))
+        if not event_id:
+            return False
+        source = str(event.get("source", ""))
+        meta = event.get("meta")
+        target = None
+        if isinstance(meta, dict) and isinstance(meta.get("target"), str):
+            target = meta["target"]
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM pending").fetchone()
+            if int(row["n"]) >= self.pending_max_rows:
+                log.warning(
+                    "next-session queue full (%d rows); refusing event_id=%s",
+                    self.pending_max_rows,
+                    event_id,
+                )
+                return False
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO pending "
+                "(event_id, source, target, event_json, enqueued_at, expires_at, attempts) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (
+                    event_id,
+                    source,
+                    target,
+                    json.dumps(event, separators=(",", ":")),
+                    now,
+                    now + self.pending_ttl_seconds,
+                ),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def claim_pending(self, source: str, limit: int = 100) -> list[PendingEvent]:
+        """Return queued events for *source*, incrementing their attempt count.
+
+        Claimed rows stay in the table: they are removed by
+        ``delete_pending`` once the adapter acks, so a crash between claim and
+        ack redelivers rather than loses (at-least-once, per Plan 006 §5).
+        """
+        now = time.time()
+        out: list[PendingEvent] = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM pending WHERE source = ? AND expires_at > ? "
+                "ORDER BY id ASC LIMIT ?",
+                (source, now, limit),
+            ).fetchall()
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE pending SET attempts = attempts + 1 WHERE id = ?",
+                    (row["id"],),
+                )
+            self._conn.commit()
+            for row in rows:
+                out.append(_pending_from_row(row, attempts_delta=1))
+        return out
+
+    def delete_pending(self, row_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM pending WHERE id = ?", (row_id,))
+            self._conn.commit()
+
+    def list_pending(self, source: str | None = None, limit: int = 200) -> list[PendingEvent]:
+        with self._lock:
+            if source:
+                rows = self._conn.execute(
+                    "SELECT * FROM pending WHERE source = ? ORDER BY id ASC LIMIT ?",
+                    (source, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM pending ORDER BY id ASC LIMIT ?", (limit,)
+                ).fetchall()
+        return [_pending_from_row(r) for r in rows]
+
+    def pending_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM pending").fetchone()
+        return int(row["n"])
+
+    # ── dead letter ──────────────────────────────────────────────────────────
+
+    def dead_letter(
+        self,
+        *,
+        kind: str,
+        source: str,
+        ref_id: str,
+        payload: dict[str, Any],
+        error: str | None = None,
+        attempts: int = 0,
+    ) -> str:
+        """Record a permanently-failed delivery and return its dead-letter id."""
+        if kind not in DEAD_LETTER_KINDS:
+            raise ValueError(f"unknown dead-letter kind {kind!r}")
+        dl_id = str(ULID())
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO dead_letter "
+                "(id, kind, source, ref_id, payload_json, error, attempts, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    dl_id,
+                    kind,
+                    source,
+                    ref_id,
+                    json.dumps(payload, separators=(",", ":")),
+                    error,
+                    attempts,
+                    time.time(),
+                ),
+            )
+            self._conn.commit()
+        log.warning(
+            "dead-lettered kind=%s source=%s ref_id=%s id=%s error=%s",
+            kind,
+            source,
+            ref_id,
+            dl_id,
+            error,
+        )
+        return dl_id
+
+    def list_dead_letters(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int = 100,
+        include_redriven: bool = False,
+    ) -> list[DeadLetter]:
+        sql = "SELECT * FROM dead_letter WHERE 1=1"
+        params: list[Any] = []
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if not include_redriven:
+            sql += " AND (redrive_status IS NULL OR redrive_status != 'ok')"
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_dead_letter_from_row(r) for r in rows]
+
+    def get_dead_letter(self, dl_id: str) -> DeadLetter | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM dead_letter WHERE id = ?", (dl_id,)
+            ).fetchone()
+        return _dead_letter_from_row(row) if row is not None else None
+
+    def mark_redriven(self, dl_id: str, status: str, error: str | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE dead_letter SET redriven_at = ?, redrive_status = ?, "
+                "error = COALESCE(?, error) WHERE id = ?",
+                (time.time(), status, error, dl_id),
+            )
+            self._conn.commit()
+
+    def dead_letter_count(self, *, include_redriven: bool = False) -> int:
+        sql = "SELECT COUNT(*) AS n FROM dead_letter"
+        if not include_redriven:
+            sql += " WHERE redrive_status IS NULL OR redrive_status != 'ok'"
+        with self._lock:
+            row = self._conn.execute(sql).fetchone()
+        return int(row["n"])
+
+    def purge_dead_letters(
+        self, *, older_than_seconds: float | None = None, redriven_only: bool = False
+    ) -> int:
+        sql = "DELETE FROM dead_letter WHERE 1=1"
+        params: list[Any] = []
+        if older_than_seconds is not None:
+            sql += " AND created_at < ?"
+            params.append(time.time() - older_than_seconds)
+        if redriven_only:
+            sql += " AND redrive_status = 'ok'"
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            self._conn.commit()
+        return int(cur.rowcount)
+
+    # ── retention ────────────────────────────────────────────────────────────
+
+    def prune(self) -> dict[str, int]:
+        """Apply retention policy. Returns per-table deletion counts.
+
+        Expired pending events are dead-lettered, not dropped: "we never got a
+        session for this in N days" is exactly the thing an operator needs to
+        see.
+        """
+        now = time.time()
+        expired_pending: list[PendingEvent] = []
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM dedupe WHERE seen_at < ?",
+                (now - self.dedupe_ttl_seconds,),
+            )
+            dedupe_ttl_deleted = int(cur.rowcount)
+
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM dedupe").fetchone()
+            overflow = int(row["n"]) - self.dedupe_max_rows
+            dedupe_cap_deleted = 0
+            if overflow > 0:
+                cur = self._conn.execute(
+                    "DELETE FROM dedupe WHERE event_id IN "
+                    "(SELECT event_id FROM dedupe ORDER BY seen_at ASC LIMIT ?)",
+                    (overflow,),
+                )
+                dedupe_cap_deleted = int(cur.rowcount)
+
+            rows = self._conn.execute(
+                "SELECT * FROM pending WHERE expires_at <= ?", (now,)
+            ).fetchall()
+            expired_pending = [_pending_from_row(r) for r in rows]
+            if expired_pending:
+                self._conn.execute(
+                    "DELETE FROM pending WHERE expires_at <= ?", (now,)
+                )
+            self._conn.commit()
+            self._inserts_since_prune = 0
+
+        for pe in expired_pending:
+            self.dead_letter(
+                kind="next_session",
+                source=pe.source,
+                ref_id=pe.event_id,
+                payload=pe.event,
+                error=(
+                    f"expired after {self.pending_ttl_seconds:.0f}s with no session "
+                    f"for source {pe.source!r}"
+                ),
+                attempts=pe.attempts,
+            )
+
+        result = {
+            "dedupe_ttl_deleted": dedupe_ttl_deleted,
+            "dedupe_cap_deleted": dedupe_cap_deleted,
+            "pending_expired": len(expired_pending),
+        }
+        if any(result.values()):
+            log.info("store prune %s", result)
+        return result
+
+
+def _pending_from_row(row: sqlite3.Row, attempts_delta: int = 0) -> PendingEvent:
+    return PendingEvent(
+        row_id=int(row["id"]),
+        event_id=str(row["event_id"]),
+        source=str(row["source"]),
+        target=row["target"],
+        event=json.loads(row["event_json"]),
+        enqueued_at=float(row["enqueued_at"]),
+        expires_at=float(row["expires_at"]),
+        attempts=int(row["attempts"]) + attempts_delta,
+    )
+
+
+def _dead_letter_from_row(row: sqlite3.Row) -> DeadLetter:
+    return DeadLetter(
+        id=str(row["id"]),
+        kind=str(row["kind"]),
+        source=str(row["source"]),
+        ref_id=str(row["ref_id"]),
+        payload=json.loads(row["payload_json"]),
+        error=row["error"],
+        attempts=int(row["attempts"]),
+        created_at=float(row["created_at"]),
+        redriven_at=row["redriven_at"],
+        redrive_status=row["redrive_status"],
+    )
+
+
+def open_store(cfg: dict[str, Any] | None = None) -> WakeStore:
+    """Open the daemon state store from *cfg* (or env/default paths)."""
+    state_cfg = (cfg or {}).get("state") or {}
+    return WakeStore(
+        resolve_state_path(cfg),
+        dedupe_ttl_seconds=state_cfg.get("dedupe_ttl_seconds", DEFAULT_DEDUPE_TTL_SECONDS),
+        dedupe_max_rows=state_cfg.get("dedupe_max_rows", DEFAULT_DEDUPE_MAX_ROWS),
+        pending_ttl_seconds=state_cfg.get("pending_ttl_seconds", DEFAULT_PENDING_TTL_SECONDS),
+        pending_max_rows=state_cfg.get("pending_max_rows", DEFAULT_PENDING_MAX_ROWS),
+        pending_max_attempts=state_cfg.get(
+            "pending_max_attempts", DEFAULT_PENDING_MAX_ATTEMPTS
+        ),
+    )

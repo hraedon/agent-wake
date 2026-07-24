@@ -125,6 +125,7 @@ def load_config() -> dict[str, Any]:
         "default_callback_url": raw.get("default_callback_url"),
         "routing": routing,
         "vault": vault_cfg,
+        "state": _validate_state_block(raw.get("state")),
     }
 
     sources = raw.get("sources", {})
@@ -241,6 +242,62 @@ def load_config() -> dict[str, Any]:
         cfg["delivery"] = {}
 
     return cfg
+
+
+_VALID_DELIVERY_MODES = {"live_only", "next_session", "managed_session"}
+
+_STATE_INT_FIELDS = (
+    "dedupe_ttl_seconds",
+    "dedupe_max_rows",
+    "pending_ttl_seconds",
+    "pending_max_rows",
+    "pending_max_attempts",
+)
+
+
+def _validate_state_block(state: object) -> dict[str, Any]:
+    """Validate the optional ``state`` block (durable store: BC-WAKE-004/012).
+
+    All keys are optional; an absent block means "defaults" and, crucially,
+    ``default_delivery = live_only`` so existing deployments keep the
+    documented v0 semantics until an operator opts in.
+    """
+    if state is None:
+        return {}
+    if not isinstance(state, dict):
+        raise ConfigError("'state' must be an object.")
+
+    result: dict[str, Any] = {}
+
+    state_dir = state.get("dir")
+    if state_dir is not None:
+        if not isinstance(state_dir, str) or not state_dir:
+            raise ConfigError("'state.dir' must be a non-empty path string.")
+        result["dir"] = state_dir
+
+    enabled = state.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'state.enabled' must be a boolean.")
+    result["enabled"] = enabled
+
+    for field in _STATE_INT_FIELDS:
+        val = state.get(field)
+        if val is None:
+            continue
+        if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+            raise ConfigError(f"'state.{field}' must be a positive integer.")
+        result[field] = val
+
+    mode = state.get("default_delivery")
+    if mode is not None:
+        if mode not in _VALID_DELIVERY_MODES:
+            raise ConfigError(
+                f"'state.default_delivery' must be one of "
+                f"{sorted(_VALID_DELIVERY_MODES)} (got {mode!r})."
+            )
+        result["default_delivery"] = mode
+
+    return result
 
 
 def _validate_vault_block(vault: object) -> None:
