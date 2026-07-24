@@ -6,6 +6,7 @@ import os
 import sys
 
 from ..config import ConfigError
+from ..store import StoreError
 
 
 def emit_error(
@@ -74,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .install_harness import _build_install_harness_parser
     _build_install_harness_parser(sub)
 
+    # dead-letter / pending — operator visibility over the durable store
+    from .queue import _build_queue_parsers
+    _build_queue_parsers(sub)
+
     return parser
 
 
@@ -105,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     argparse's usage errors raise ``SystemExit`` (exit 2) straight through — a
     ``BaseException``, not caught here, so the usage taxonomy is preserved. Any
     other uncaught exception becomes a contract envelope instead of a traceback:
-    a ``ConfigError`` (missing/invalid config) maps to ``CONFIG_ERROR``; anything
+    a ``ConfigError`` (missing/invalid config) maps to ``CONFIG_ERROR``, a
+    ``StoreError`` (durable state unreadable) to ``STORE_ERROR``; anything
     else is reported as ``INTERNAL_ERROR``. A closed downstream pipe is swallowed
     the CPython way so the interpreter's final flush can't re-raise (§4).
     """
@@ -125,6 +131,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except ConfigError as exc:
         return emit_error("CONFIG_ERROR", str(exc), use_json=json_mode)
+    except StoreError as exc:
+        # The durable store could not be opened (bad path, permissions, corrupt
+        # file). Retryable: fixing the path or permissions makes the same
+        # command work.
+        return emit_error(
+            "STORE_ERROR", str(exc), use_json=json_mode, retryable=True
+        )
     except Exception as exc:  # last-resort boundary: never surface a traceback
         return emit_error(
             "INTERNAL_ERROR",
