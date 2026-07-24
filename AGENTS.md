@@ -64,18 +64,18 @@ for the scope statement.
 - Routing: how does an event find the right session(s)? Session ID is
   obvious for opencode; Claude Code channels are session-scoped at
   launch. Multi-session routing is a v1.5+ problem.
-- **Durable inbox / Signal-With-Start semantics.** Today wake hits
-  live sessions only; if no session is active, the event is lost (or
-  for opencode, only delivered if a session exists at ingest time).
-  Temporal's Signal-With-Start is the closest functional analog:
-  lazy-init a workflow if none is running, then deliver the signal.
-  Open product decision: does agent-wake want regista to maintain
-  a per-session inbox so missed events are delivered on next session
-  start? This is the same decision as durable post-restart dedupe
-  for `event_id`. Punt to v1 with regista's involvement, but make
-  the call explicitly — "wake hits live sessions only" vs "wake has
-  durable delivery semantics" is a real product split.
-  See `design/research-findings-round2.md` §3.2.
+- ~~**Durable inbox / Signal-With-Start semantics.**~~ **DECIDED
+  2026-07-24** (BC-WAKE-004 / BC-WAKE-012). The product split is
+  resolved by making it *per-event*, not global: `live_only` (the
+  default, i.e. the old "wake hits live sessions only" contract) vs
+  `next_session` / `managed_session`, chosen with `meta.delivery` and
+  defaultable per-daemon via `state.default_delivery`. The inbox is
+  **daemon-local SQLite**, not regista — the daemon must not gain a
+  hard dependency on a coordination service to answer "have I seen
+  this event_id before?". Same store backs durable post-restart
+  dedupe, the next-session queue and the dead-letter table. See
+  README §Delivery semantics and `daemon/src/agent_waked/store.py`.
+  Regista remains the *ingest* path, not the delivery-state store.
 - Authentication / sender gating: required for any HTTP ingest. Same
   rationale as the channels docs — "an ungated channel is a prompt
   injection vector."

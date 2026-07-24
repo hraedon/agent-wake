@@ -115,11 +115,14 @@ External system
 │ agent-waked                                               │
 │                                                           │
 │  HTTP ingest ──► gating ──► dedupe ──► router             │
-│                                            │              │
-│                                            ▼              │
-│                                  unix-socket pub          │
-│                                            │              │
-│  HTTPS reply ◄── outbox ◄── reply rx ◄─── (frames)       │
+│                              │             │              │
+│                              ▼             ▼              │
+│                        durable store   unix-socket pub    │
+│                        (SQLite)            │              │
+│                          ▲   ▲             │              │
+│  HTTPS reply ◄── outbox ─┘   └─ next-session queue        │
+│                    ▲                                      │
+│                    └── reply rx ◄─── (frames)             │
 └───────────────────────────────────────────────────────────┘
                         │ (unix socket: $XDG_RUNTIME_DIR/agent-wake.sock)
                         ▼
@@ -138,10 +141,72 @@ External system
 - Claude Code: channel plugin emitting `notifications/claude/channel` with `{ content, meta }`. Requires `--dangerously-load-development-channels server:agent-wake-claude` during the research preview. Connects to the daemon via unix socket.
 - opencode: in-process plugin emitting `session.promptAsync` for each wake event. Connects to the daemon via unix socket. See `adapters/opencode.archived/` for the pre-daemon implementation (kept for historical reference).
 
+## Delivery semantics
+
+By default a wake **hits live sessions only**: if no adapter is subscribed for
+the event's source, the daemon reports `no_subscriber` and the event is not
+retained. That is the v0 contract and it is unchanged.
+
+An event can ask for more by setting `meta.delivery`:
+
+| `meta.delivery`   | Behaviour when no session is live                          |
+|-------------------|------------------------------------------------------------|
+| `live_only`       | Default. Dropped, reported as `no_subscriber`.              |
+| `next_session`    | Durably queued; delivered when the next session for that source subscribes. Ingest reports `queued_next_session`. |
+| `managed_session` | Same queue. Reserved for Plan 006 Phase 2B (a daemon-owned harness process drains it). |
+
+A daemon-wide default can be set with `state.default_delivery`; a per-event
+`meta.delivery` always wins, so a deployment that opts everything in can still
+mark individual events `live_only`.
+
+Queued events are delivered at-least-once: the row is removed only when the
+adapter acks. After `state.pending_max_attempts` unacked deliveries — or after
+`state.pending_ttl_seconds` with no session at all — the event is
+**dead-lettered** rather than dropped.
+
+### Durable state
+
+The daemon keeps dedupe, the next-session queue and the dead-letter table in a
+single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
+`state.dir` or `AGENT_WAKE_STATE_DIR`). Consequences:
+
+- A replayed `event_id` is rejected **across daemon restarts**, not just within
+  one process lifetime.
+- A reply whose callback permanently fails is dead-lettered and can be resent.
+
+```jsonc
+// config.json
+"state": {
+  "dir": "/var/lib/agent-wake",   // optional
+  "enabled": true,                // false = in-memory dedupe, no queue
+  "default_delivery": "live_only",
+  "dedupe_ttl_seconds": 604800,
+  "dedupe_max_rows": 100000,
+  "pending_ttl_seconds": 604800,
+  "pending_max_rows": 10000,
+  "pending_max_attempts": 5
+}
+```
+
+### Operator commands
+
+```bash
+agent-wake pending list                  # what is queued for the next session
+agent-wake pending prune                 # apply retention now
+agent-wake dead-letter list              # what failed permanently, and why
+agent-wake dead-letter show <id>         # the full payload
+agent-wake dead-letter redrive <id>      # resend it (replies) / requeue it (events)
+agent-wake dead-letter purge --older-than-days 30
+```
+
+All of these accept `--json` and emit the suite CLI contract v1 error envelope
+on failure. `agent-wake doctor` reports a `durable_state` check and warns when
+the dead-letter table is non-empty.
+
 ## Scope
 
 - **In scope**: daemon (shared ingest port, routing, reply delivery), harness adapters, shared event schema, ingest mechanisms (HTTP, regista hook consumer), wake / silent-inject modes.
-- **Out of scope (for now)**: pipeline orchestration (sf2's job), durable event storage (regista's job), action audit (agent-provenance's job). agent-wake composes with these, doesn't replicate them.
+- **Out of scope (for now)**: pipeline orchestration (sf2's job), durable event storage (regista's job), action audit (agent-provenance's job). agent-wake composes with these, doesn't replicate them. The daemon's own SQLite state is delivery bookkeeping (dedupe window, next-session queue, dead-letter) with a bounded retention policy — it is deliberately *not* an event archive.
 
 ## Real-world examples
 
