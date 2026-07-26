@@ -230,16 +230,30 @@ def _check_delivery_health() -> tuple[str, str]:
                                 f"{f.get('channel', '?')}→{f.get('principal_id', '?')}"
                                 for f in failing
                             )
-                            parts.append(f"delivery channel failures: {chans} (see daemon logs for detail)")
+                            parts.append(
+                                f"delivery channel failures: {chans} "
+                                "(see daemon logs for detail)"
+                            )
                         if unknown:
-                            parts.append(f"events targeted unknown principals: {', '.join(unknown)}")
+                            parts.append(
+                                "events targeted unknown principals: "
+                                f"{', '.join(unknown)}"
+                            )
                         if parts:
                             return "warn", "; ".join(parts)
                         n = len(delivery)
                         return "ok", f"{n} principal(s), delivery healthy"
-        return "ok", f"{len(delivery)} delivery channel(s) configured (daemon health endpoint returned HTTP {resp.status})"
+        return (
+            "ok",
+            f"{len(delivery)} delivery channel(s) configured "
+            f"(daemon health endpoint returned HTTP {resp.status})",
+        )
     except Exception:
-        return "ok", f"{len(delivery)} delivery channel(s) configured (daemon not running; live health unchecked)"
+        return (
+            "ok",
+            f"{len(delivery)} delivery channel(s) configured "
+            "(daemon not running; live health unchecked)",
+        )
 
 
 def _check_regista() -> dict[str, Any] | None:

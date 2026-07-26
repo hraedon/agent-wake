@@ -100,7 +100,10 @@ def load_config() -> dict[str, Any]:
         raise ConfigError(f"Unsupported config version {version!r}. Only 0 and 1 are accepted.")
 
     if version == 0:
-        log.warning("config version 0 is deprecated; upgrade to version 1 and add a 'routing' block")
+        log.warning(
+            "config version 0 is deprecated; "
+            "upgrade to version 1 and add a 'routing' block"
+        )
 
     listen = raw.get("listen", {})
     routing = raw.get("routing", {})

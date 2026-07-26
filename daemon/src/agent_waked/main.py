@@ -148,7 +148,11 @@ def _warn_non_loopback_bind(host: str, cfg: dict[str, Any], explicit: bool = Fal
         )
 
 
-def _reload_config(cfg: dict[str, Any], router: Router, resolver: SecretResolver | None = None) -> None:
+def _reload_config(
+    cfg: dict[str, Any],
+    router: Router,
+    resolver: SecretResolver | None = None,
+) -> None:
     """SIGHUP handler: reload config, update shared state in-place.
 
     Per spec §6.3:
@@ -197,7 +201,11 @@ def _reload_config(cfg: dict[str, Any], router: Router, resolver: SecretResolver
         if key not in new_cfg:
             del cfg[key]
 
-    log.info("config reloaded: %d sources, routing=%s", len(cfg.get("sources", {})), bool(cfg.get("routing")))
+    log.info(
+        "config reloaded: %d sources, routing=%s",
+        len(cfg.get("sources", {})),
+        bool(cfg.get("routing")),
+    )
     # Refresh all cached secrets so vault-mode picks up rotations immediately.
     if resolver is not None:
         import asyncio as _asyncio

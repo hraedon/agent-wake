@@ -122,7 +122,11 @@ def test_secrets_add_env_prints_secret_once(cfg_empty, capsys):
     # Secret should appear in stdout
     lines = [line.strip() for line in out.splitlines() if line.strip()]
     # There should be a 64-char hex line (32 bytes hex)
-    hex_lines = [line for line in lines if len(line) == 64 and all(c in "0123456789abcdef" for c in line)]
+    hex_lines = [
+        line
+        for line in lines
+        if len(line) == 64 and all(c in "0123456789abcdef" for c in line)
+    ]
     assert len(hex_lines) == 1
 
 

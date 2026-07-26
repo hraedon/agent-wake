@@ -44,11 +44,11 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# Deliberate, explicit selection matching the family convention (the daemon
-# previously had no ruff config/CI). E4/E7/E9 + F + I (isort) + N (naming) + W
-# + UP (pyupgrade) + RUF; the noisy ruff-0.16 expanded defaults (TRY/BLE/PLW/
-# SIM/S) are excluded, and E501 (line-length, never enforced) is deferred.
-select = ["E4", "E7", "E9", "F", "I", "N", "W", "UP", "RUF"]
+# Full-E family selection matching regista/cairn: ruff's standard E (incl.
+# E501 line-length, now enforced at 100) + F + I (isort) + N (naming) + W +
+# UP (pyupgrade) + RUF. The noisy ruff-0.16 expanded defaults (TRY/BLE/PLW/
+# SIM/S) remain deliberately excluded.
+select = ["E", "F", "I", "N", "W", "UP", "RUF"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

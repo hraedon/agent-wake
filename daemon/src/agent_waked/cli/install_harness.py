@@ -118,7 +118,9 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def _merge_env_block(config: dict[str, Any], env_vars: dict[str, str]) -> tuple[list[str], list[str]]:
+def _merge_env_block(
+    config: dict[str, Any], env_vars: dict[str, str]
+) -> tuple[list[str], list[str]]:
     """Merge env vars into the config's 'env' block.
 
     Returns ``(changed, skipped)`` where:
@@ -206,7 +208,10 @@ def _wire_claude(dry_run: bool, uninstall: bool, user: str | None) -> list[dict[
         "kind": "info",
         "path": "",
         "keys": [],
-        "detail": "launch claude with: --dangerously-load-development-channels server:agent-wake-claude",
+        "detail": (
+            "launch claude with: "
+            "--dangerously-load-development-channels server:agent-wake-claude"
+        ),
     })
 
     if not dry_run and changed:
@@ -226,7 +231,12 @@ def _unwire_claude(
     """Remove agent-wake entries from claude settings."""
     entry = manifest.get("installed", {}).get("claude")
     if not entry:
-        actions.append({"kind": "noop", "path": str(_CLAUDE_SETTINGS), "keys": [], "detail": "claude not wired by install-harness"})
+        actions.append({
+            "kind": "noop",
+            "path": str(_CLAUDE_SETTINGS),
+            "keys": [],
+            "detail": "claude not wired by install-harness",
+        })
         return actions
 
     try:
@@ -252,7 +262,12 @@ def _unwire_claude(
             "detail": "removed wake env vars from claude settings",
         })
     else:
-        actions.append({"kind": "noop", "path": str(_CLAUDE_SETTINGS), "keys": [], "detail": "nothing to remove"})
+        actions.append({
+            "kind": "noop",
+            "path": str(_CLAUDE_SETTINGS),
+            "keys": [],
+            "detail": "nothing to remove",
+        })
 
     if not dry_run and removed:
         _atomic_write_json(_CLAUDE_SETTINGS, config)
@@ -310,7 +325,10 @@ def _wire_opencode(dry_run: bool, uninstall: bool, user: str | None) -> list[dic
         actions.append({
             "kind": "check_failed",
             "path": "adapters/opencode/dist/index.js",
-            "detail": "opencode plugin not built; run: cd adapters/opencode && bun install && bun run build",
+            "detail": (
+                "opencode plugin not built; run: "
+                "cd adapters/opencode && bun install && bun run build"
+            ),
         })
         return actions
 
@@ -339,7 +357,10 @@ def _wire_opencode(dry_run: bool, uninstall: bool, user: str | None) -> list[dic
         if "plugins" not in config:
             config["plugins"] = []
         else:
-            raise TypeError(f"config 'plugins' is {type(config['plugins']).__name__}, expected list")
+            raise TypeError(
+                f"config 'plugins' is {type(config['plugins']).__name__}, "
+                "expected list"
+            )
     plugins = config["plugins"]
     already_present = any(
         isinstance(p, dict) and p.get("path") == plugin_path
@@ -386,7 +407,12 @@ def _unwire_opencode(
     """Remove agent-wake entries from opencode config."""
     entry = manifest.get("installed", {}).get("opencode")
     if not entry:
-        actions.append({"kind": "noop", "path": str(_OPENCODE_CONFIG), "keys": [], "detail": "opencode not wired by install-harness"})
+        actions.append({
+            "kind": "noop",
+            "path": str(_OPENCODE_CONFIG),
+            "keys": [],
+            "detail": "opencode not wired by install-harness",
+        })
         return actions
 
     try:
@@ -411,7 +437,11 @@ def _unwire_opencode(
     if plugin_path and "plugins" in config:
         plugins = config.get("plugins", [])
         if isinstance(plugins, list):
-            new_plugins = [p for p in plugins if not (isinstance(p, dict) and p.get("path") == plugin_path)]
+            new_plugins = [
+                p
+                for p in plugins
+                if not (isinstance(p, dict) and p.get("path") == plugin_path)
+            ]
             if len(new_plugins) < len(plugins):
                 config["plugins"] = new_plugins
                 removed.append(f"plugins[{plugin_path}]")
@@ -426,7 +456,12 @@ def _unwire_opencode(
             "detail": "removed wake env vars and plugin from opencode config",
         })
     else:
-        actions.append({"kind": "noop", "path": str(_OPENCODE_CONFIG), "keys": [], "detail": "nothing to remove"})
+        actions.append({
+            "kind": "noop",
+            "path": str(_OPENCODE_CONFIG),
+            "keys": [],
+            "detail": "nothing to remove",
+        })
 
     if not dry_run and removed:
         _atomic_write_json(_OPENCODE_CONFIG, config)
@@ -635,7 +670,10 @@ def _wire_hermes(dry_run: bool, uninstall: bool, user: str | None) -> list[dict[
         actions.append({
             "kind": "check_failed",
             "path": "adapters/hermes",
-            "detail": "hermes plugin source not found; expected adapters/hermes/plugin.yaml and __init__.py",
+            "detail": (
+                "hermes plugin source not found; expected "
+                "adapters/hermes/plugin.yaml and __init__.py"
+            ),
         })
         return actions
 
@@ -712,7 +750,12 @@ def _unwire_hermes(
     """Remove agent-wake entries from hermes config."""
     entry = manifest.get("installed", {}).get("hermes")
     if not entry:
-        actions.append({"kind": "noop", "path": str(_HERMES_ENV), "keys": [], "detail": "hermes not wired by install-harness"})
+        actions.append({
+            "kind": "noop",
+            "path": str(_HERMES_ENV),
+            "keys": [],
+            "detail": "hermes not wired by install-harness",
+        })
         return actions
 
     removed: list[str] = []
@@ -738,10 +781,18 @@ def _unwire_hermes(
             "kind": "remove_keys",
             "path": str(_HERMES_ENV),
             "keys": removed,
-            "detail": f"removed wake env block{' and plugin directory' if plugin_removed else ''} from hermes",
+            "detail": (
+                "removed wake env block"
+                f"{' and plugin directory' if plugin_removed else ''} from hermes"
+            ),
         })
     else:
-        actions.append({"kind": "noop", "path": str(_HERMES_ENV), "keys": [], "detail": "nothing to remove"})
+        actions.append({
+            "kind": "noop",
+            "path": str(_HERMES_ENV),
+            "keys": [],
+            "detail": "nothing to remove",
+        })
 
     if not dry_run and removed_keys:
         _write_env_file(_HERMES_ENV, new_lines)
@@ -786,7 +837,9 @@ def _run_install(harness: str, dry_run: bool, uninstall: bool, user: str | None)
                 }
             ]
         else:
-            all_actions.append({"kind": "error", "path": "", "detail": f"unknown harness: {target}"})
+            all_actions.append(
+                {"kind": "error", "path": "", "detail": f"unknown harness: {target}"}
+            )
             no_op = False
             continue
         all_actions.extend(actions)

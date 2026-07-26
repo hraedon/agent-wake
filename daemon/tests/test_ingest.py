@@ -207,7 +207,9 @@ async def test_unknown_source_403(client, router):
 
 @pytest.mark.asyncio
 async def test_invalid_signature_403(client, router):
-    body = json.dumps({"v": 0, "event_id": "evt-sig", "source": "test", "kind": "alert", "content": "x"}).encode()
+    body = json.dumps(
+        {"v": 0, "event_id": "evt-sig", "source": "test", "kind": "alert", "content": "x"}
+    ).encode()
     resp = await _make_request(client, body, sig="sha256=deadbeef")
     assert resp.status == 403
 

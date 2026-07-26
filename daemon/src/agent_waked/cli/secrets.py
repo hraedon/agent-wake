@@ -278,7 +278,12 @@ def _summarize_sources(sources: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             backend = "unknown"
             uris = []
-        rows.append({"source": name, "backend": backend, "n_secrets": len(uris), "secret_uris": uris})
+        rows.append({
+            "source": name,
+            "backend": backend,
+            "n_secrets": len(uris),
+            "secret_uris": uris,
+        })
     return rows
 
 
@@ -447,7 +452,11 @@ def _cmd_rotate(args: argparse.Namespace) -> int:
     new_uris = [new_uri, *existing_uris[:1]]
 
     # Promote to list form in config.
-    sources[source] = {k: v for k, v in info.items() if k not in ("secret", "secret_env", "secrets")}
+    sources[source] = {
+        k: v
+        for k, v in info.items()
+        if k not in ("secret", "secret_env", "secrets")
+    }
     sources[source]["secrets"] = new_uris
 
     _save_raw_config(raw)

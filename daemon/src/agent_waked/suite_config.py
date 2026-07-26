@@ -32,7 +32,11 @@ from typing import Any
 _PER_USER_DEFAULT = Path.home() / ".config" / "agent-suite" / "suite.env"
 
 if sys.platform == "win32":
-    _SYSTEM_DEFAULT = Path(os.environ.get("ProgramData", "C:\\ProgramData")) / "agent-suite" / "suite.env"
+    _SYSTEM_DEFAULT = (
+        Path(os.environ.get("ProgramData", "C:\\ProgramData"))
+        / "agent-suite"
+        / "suite.env"
+    )
 else:
     _SYSTEM_DEFAULT = Path("/etc/agent-suite/suite.env")
 

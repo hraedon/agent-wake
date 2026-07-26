@@ -48,7 +48,10 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 def test_claude_install_sets_env_vars(isolated_home):
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "merge_json" for a in actions)
@@ -59,7 +62,10 @@ def test_claude_install_sets_env_vars(isolated_home):
 
 def test_claude_install_idempotent(isolated_home):
     """Re-running install-harness on already-wired config is a no-op."""
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         _wire_claude(dry_run=False, uninstall=False, user=None)
         actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
@@ -77,7 +83,10 @@ def test_claude_install_missing_adapter(isolated_home):
 
 
 def test_claude_install_dry_run_does_not_write(isolated_home):
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         _wire_claude(dry_run=True, uninstall=False, user=None)
 
     assert not isolated_home.claude.exists()
@@ -85,7 +94,10 @@ def test_claude_install_dry_run_does_not_write(isolated_home):
 
 
 def test_claude_uninstall_removes_env_vars(isolated_home):
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         _wire_claude(dry_run=False, uninstall=False, user=None)
         actions = _wire_claude(dry_run=False, uninstall=True, user=None)
 
@@ -108,7 +120,10 @@ def test_claude_install_preserves_existing_config(isolated_home):
         "some_other_setting": True,
     })
 
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         _wire_claude(dry_run=False, uninstall=False, user=None)
 
     config = json.loads(isolated_home.claude.read_text())
@@ -126,7 +141,10 @@ def test_opencode_install_registers_plugin(isolated_home, tmp_path):
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
-    with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with patch(
+        "agent_waked.cli.install_harness._find_opencode_plugin_path",
+        return_value=str(fake_dist),
+    ):
         actions = _wire_opencode(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "merge_json" for a in actions)
@@ -141,7 +159,10 @@ def test_opencode_install_idempotent(isolated_home, tmp_path):
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
-    with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with patch(
+        "agent_waked.cli.install_harness._find_opencode_plugin_path",
+        return_value=str(fake_dist),
+    ):
         _wire_opencode(dry_run=False, uninstall=False, user=None)
         actions = _wire_opencode(dry_run=False, uninstall=False, user=None)
 
@@ -201,7 +222,10 @@ def test_opencode_uninstall_removes_plugin(isolated_home, tmp_path):
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
-    with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with patch(
+        "agent_waked.cli.install_harness._find_opencode_plugin_path",
+        return_value=str(fake_dist),
+    ):
         _wire_opencode(dry_run=False, uninstall=False, user=None)
         actions = _wire_opencode(dry_run=False, uninstall=True, user=None)
 
@@ -223,7 +247,10 @@ def test_opencode_install_preserves_existing_config(isolated_home, tmp_path):
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
-    with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with patch(
+        "agent_waked.cli.install_harness._find_opencode_plugin_path",
+        return_value=str(fake_dist),
+    ):
         _wire_opencode(dry_run=False, uninstall=False, user=None)
 
     config = json.loads(isolated_home.opencode.read_text())
@@ -238,7 +265,10 @@ def test_opencode_install_with_user_writes_principal_id(isolated_home, tmp_path)
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
-    with patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with patch(
+        "agent_waked.cli.install_harness._find_opencode_plugin_path",
+        return_value=str(fake_dist),
+    ):
         _wire_opencode(dry_run=False, uninstall=False, user="alice@example.com")
 
     config = json.loads(isolated_home.opencode.read_text())
@@ -394,9 +424,20 @@ def test_run_install_all_targets_all_wired(isolated_home, tmp_path):
 
     hermes_src = _make_fake_plugin_source(tmp_path)
 
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"), \
-         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)), \
-         patch("agent_waked.cli.install_harness._find_hermes_plugin_source", return_value=str(hermes_src)):
+    with (
+        patch(
+            "agent_waked.cli.install_harness.shutil.which",
+            return_value="/fake/agent-wake-claude",
+        ),
+        patch(
+            "agent_waked.cli.install_harness._find_opencode_plugin_path",
+            return_value=str(fake_dist),
+        ),
+        patch(
+            "agent_waked.cli.install_harness._find_hermes_plugin_source",
+            return_value=str(hermes_src),
+        ),
+    ):
         result = _run_install("all", dry_run=False, uninstall=False, user=None)
 
     assert result["tool"] == "agent-wake"
@@ -405,7 +446,10 @@ def test_run_install_all_targets_all_wired(isolated_home, tmp_path):
 
 
 def test_run_install_dry_run_returns_actions(isolated_home):
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         result = _run_install("claude", dry_run=True, uninstall=False, user=None)
 
     assert "actions" in result
@@ -441,7 +485,10 @@ def test_claude_install_no_clobber_existing_value(isolated_home):
     _write_json(isolated_home.claude, {
         "env": {"AGENT_WAKE_CONFIG": "/custom/path/config.json"},
     })
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
     config = json.loads(isolated_home.claude.read_text())
@@ -453,7 +500,10 @@ def test_claude_install_no_clobber_existing_value(isolated_home):
 
 def test_claude_install_with_user_writes_principal_id(isolated_home):
     """--user should write AGENT_WAKE_PRINCIPAL_ID to the env block."""
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         _wire_claude(dry_run=False, uninstall=False, user="alice@example.com")
 
     config = json.loads(isolated_home.claude.read_text())
@@ -465,7 +515,10 @@ def test_claude_install_corrupted_json_errors(isolated_home):
     isolated_home.claude.parent.mkdir(parents=True, exist_ok=True)
     isolated_home.claude.write_text("{invalid json", encoding="utf-8")
 
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         actions = _wire_claude(dry_run=False, uninstall=False, user=None)
 
     assert any(a["kind"] == "error" for a in actions)
@@ -475,7 +528,10 @@ def test_claude_install_corrupted_json_errors(isolated_home):
 
 def test_claude_uninstall_missing_env_block_no_crash(isolated_home):
     """Uninstall should not crash if env block was manually removed."""
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
+    with patch(
+        "agent_waked.cli.install_harness.shutil.which",
+        return_value="/fake/agent-wake-claude",
+    ):
         _wire_claude(dry_run=False, uninstall=False, user=None)
         # Manually remove env block
         config = json.loads(isolated_home.claude.read_text())
@@ -507,8 +563,16 @@ def test_dual_harness_config_vocabulary_consistent(isolated_home, tmp_path, monk
     custom_config = str(tmp_path / "custom-wake.json")
     monkeypatch.setenv("AGENT_WAKE_CONFIG", custom_config)
 
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"), \
-         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with (
+        patch(
+            "agent_waked.cli.install_harness.shutil.which",
+            return_value="/fake/agent-wake-claude",
+        ),
+        patch(
+            "agent_waked.cli.install_harness._find_opencode_plugin_path",
+            return_value=str(fake_dist),
+        ),
+    ):
         _wire_claude(dry_run=False, uninstall=False, user="bob@example.com")
         _wire_opencode(dry_run=False, uninstall=False, user="bob@example.com")
 
@@ -534,8 +598,16 @@ def test_dual_harness_uninstall_cleans_both(isolated_home, tmp_path):
     fake_dist.parent.mkdir(parents=True)
     fake_dist.touch()
 
-    with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"), \
-         patch("agent_waked.cli.install_harness._find_opencode_plugin_path", return_value=str(fake_dist)):
+    with (
+        patch(
+            "agent_waked.cli.install_harness.shutil.which",
+            return_value="/fake/agent-wake-claude",
+        ),
+        patch(
+            "agent_waked.cli.install_harness._find_opencode_plugin_path",
+            return_value=str(fake_dist),
+        ),
+    ):
         _wire_claude(dry_run=False, uninstall=False, user=None)
         _wire_opencode(dry_run=False, uninstall=False, user=None)
         _wire_claude(dry_run=False, uninstall=True, user=None)

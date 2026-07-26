@@ -62,7 +62,9 @@ class TestAcceptedSources:
 
     def test_mixed_sources(self):
         r = Router(_config_with_routing())
-        assert r.accepted_sources_for("claude", ["github-actions", "telegram-bot"]) == ["github-actions"]
+        assert r.accepted_sources_for(
+            "claude", ["github-actions", "telegram-bot"]
+        ) == ["github-actions"]
 
     def test_unrouted_source_accepted_by_any(self):
         r = Router(_config_with_routing())
@@ -157,7 +159,15 @@ class TestDeliver:
         conn = MockConn()
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
 
-        event = {"v": 0, "event_id": "e-test", "source": "github-actions", "kind": "webhook", "content": "hi", "meta": {}, "wake": True}
+        event = {
+            "v": 0,
+            "event_id": "e-test",
+            "source": "github-actions",
+            "kind": "webhook",
+            "content": "hi",
+            "meta": {},
+            "wake": True,
+        }
         await r.deliver(event)
 
         assert len(sent) == 1
@@ -178,7 +188,15 @@ class TestDeliver:
         conn = MockConn()
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
 
-        event = {"v": 0, "event_id": "e-imm", "source": "github-actions", "kind": "webhook", "content": "hi", "meta": {}, "wake": True}
+        event = {
+            "v": 0,
+            "event_id": "e-imm",
+            "source": "github-actions",
+            "kind": "webhook",
+            "content": "hi",
+            "meta": {},
+            "wake": True,
+        }
         original = dict(event)
         await r.deliver(event)
         assert event == original
