@@ -18,6 +18,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install daemon
+        # The conformance kit (agent-suite-conformance==1.1.0) is a normal pinned
+        # PyPI dep of the [dev] extra. Its python_version >= '3.12' marker means
+        # the 3.11 lane never installs it and the conformance gate skips there via
+        # importorskip; the 3.12 lane runs the gate for real.
         run: pip install -e ".[dev,vault]"
         working-directory: daemon
       - name: Run mypy
@@ -26,6 +30,46 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
         working-directory: daemon
+
+  # CLI contract v1 conformance, built-wheel lane (docs/cli-contract.md §7). The
+  # per-PR source lane above runs the gate against an editable checkout, where
+  # pytest's ``pythonpath = ["src"]`` can shadow the installed package. This lane
+  # proves the *published artifact* conforms: it builds the daemon wheel, installs
+  # it with the pinned conformance kit into a clean >=3.12 venv, and runs the
+  # conformance + meta-guard gates from a scratch dir that carries no pyproject/
+  # src — so ``agent_waked`` resolves from site-packages, never the source tree.
+  # >=3.12 because the conformance kit requires it.
+  conformance-wheel:
+    name: Conformance (built wheel, no source shadowing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # actions/checkout@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build daemon wheel
+        run: pip wheel --no-deps --wheel-dir /tmp/aw-dist .
+        working-directory: daemon
+      - name: Install built wheel + dev extras into a clean venv
+        # Install the freshly built daemon wheel with its [dev] extra; the
+        # conformance kit (agent-suite-conformance==1.1.0) and every other dep
+        # come from PyPI. Resolve the wheel path so the step is not coupled to the
+        # version string.
+        run: |
+          python -m venv /tmp/aw-venv
+          wheel=$(ls /tmp/aw-dist/agent_waked-*.whl)
+          /tmp/aw-venv/bin/pip install "${wheel}[dev]"
+      - name: Prove no source shadowing
+        run: /tmp/aw-venv/bin/python -c "import agent_waked, agent_suite.conformance as c; assert 'site-packages' in agent_waked.__file__, agent_waked.__file__; print('agent_waked:', agent_waked.__file__); print('kit:', c.KIT_VERSION, c.__file__)"
+      - name: Run conformance + meta-guard gates against installed entry points
+        # Copy ONLY the two gate files into a scratch tests/ dir (no pyproject, no
+        # src) so there is no pythonpath shadowing; the CLI is invoked as
+        # ``sys.executable -m agent_waked.cli`` and resolves from site-packages.
+        run: |
+          mkdir -p /tmp/aw-gate/tests
+          cp daemon/tests/test_cli_conformance.py daemon/tests/test_conformance_meta_guard.py /tmp/aw-gate/tests/
+          cd /tmp/aw-gate
+          /tmp/aw-venv/bin/python -m pytest tests/ -v --tb=short -p no:cacheprovider
 
   python-claude:
     runs-on: ubuntu-latest
