@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 from aiohttp import ClientSession, ClientTimeout
 
+from . import addressing
+
 if TYPE_CHECKING:
     from .store import WakeStore
 
@@ -68,20 +70,24 @@ class Outbox:
         content: str,
         error: str | None,
         attempts: int,
+        destination: str | None = None,
     ) -> str | None:
         """Persist a permanently-failed reply for operator redrive."""
         if self._store is None:
             return None
+        payload: dict[str, Any] = {
+            "source": source,
+            "reply_id": reply_id,
+            "in_reply_to": in_reply_to,
+            "content": content,
+        }
+        if destination is not None:
+            payload["destination"] = destination
         return self._store.dead_letter(
             kind="reply",
             source=source,
             ref_id=reply_id,
-            payload={
-                "source": source,
-                "reply_id": reply_id,
-                "in_reply_to": in_reply_to,
-                "content": content,
-            },
+            payload=payload,
             error=error,
             attempts=attempts,
         )
@@ -94,21 +100,55 @@ class Outbox:
             await self._session.close()
             self._session = None
 
+    def peer_identity(
+        self, source: str, destination: str | None
+    ) -> dict[str, str]:
+        """Who this reply is *from*, in the estate's principal vocabulary.
+
+        The reply path had no answer to this, which is why signing it
+        (BC-WAKE-008), scoping label subscriptions to a principal
+        (BC-WAKE-017) and authenticating permission relays (BC-WAKE-018) could
+        not be built against the v1 model: there was nothing to sign *as*. Now
+        the destination names the addressee and the destination carries its
+        principal, so the reply can be attributed without inferring anything
+        from the connection.
+
+        Deliberately returns only what the config asserts — no defaults, no
+        "unknown" placeholder. A fabricated identity on an attribution field is
+        worse than an absent one.
+        """
+        out: dict[str, str] = {}
+        if destination:
+            out["destination"] = destination
+            dest = addressing.destination(self._config, destination)
+            if dest is not None and dest.principal:
+                out["principal"] = dest.principal
+        return out
+
     async def deliver(
         self,
         source: str,
         reply_id: str,
         in_reply_to: str,
         content: str,
+        destination: str | None = None,
     ) -> dict[str, Any]:
         """Deliver a reply to the configured callback URL.
 
         Retries up to ``_MAX_RETRIES`` times with exponential backoff.
         Returns a dict matching the ``reply_result`` payload fields
         (minus the ``"type"`` key) per spec §4.3.7.
+
+        *destination* names the addressee that produced the reply. It is carried
+        into the payload's ``meta`` so the callback receiver learns who replied,
+        and it is the identity BC-WAKE-008 will sign as — see
+        :meth:`peer_identity`. This method still does **not** authenticate the
+        outbound request; that is the security-hardening work this refactor was
+        sequenced before, deliberately, so it is not built against a model that
+        cannot name its peer.
         """
-        sources = self._config.get("sources", {})
-        source_cfg = sources.get(source, {})
+        senders = addressing.sender_table(self._config)
+        source_cfg = senders.get(source, {})
         callback_url = source_cfg.get("callback_url") or self._config.get(
             "default_callback_url"
         )
@@ -138,6 +178,7 @@ class Outbox:
                 content=content,
                 error=url_err,
                 attempts=0,
+                destination=destination,
             )
             return {
                 "reply_id": reply_id,
@@ -150,7 +191,7 @@ class Outbox:
             "v": 0,
             "in_reply_to": in_reply_to,
             "content": content,
-            "meta": {},
+            "meta": self.peer_identity(source, destination),
         }
 
         last_error: str | None = None
@@ -239,6 +280,7 @@ class Outbox:
             content=content,
             error=last_error,
             attempts=self._max_retries,
+            destination=destination,
         )
         result: dict[str, Any] = {
             "reply_id": reply_id,

@@ -5,7 +5,7 @@ signs and verifies wake events, so it is the only one that must be able to read
 the material.  Other contexts legitimately cannot: ``agent-wake doctor`` is run
 by the suite's scheduled ``agent-suite-doctor-alert.service`` as ``root`` with
 only ``/etc/agent-suite/suite.env`` loaded, which by design does not carry
-per-source signing keys (``docs/secrets-instantiation.md``), and a ``%h`` path
+per-source signing keys (agent-suite ``docs/secrets-vault.md``), and a ``%h`` path
 would not reach the user's ``secrets.env`` from a root unit anyway.
 
 This module answers exactly one question and attaches no policy to the answer:

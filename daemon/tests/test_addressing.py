@@ -1042,3 +1042,109 @@ def test_doctor_addressing_is_ok_on_the_legacy_live_shape(tmp_path, monkeypatch)
     status, detail = _check_addressing()
     assert status == "ok", detail
     assert "2 sender(s) → 2 destination(s)" in detail
+
+
+# ── outbound peer identity (prerequisite for BC-WAKE-008/017/018) ─────────────
+
+
+def test_reply_carries_the_replying_peers_identity():
+    """The outbound path can finally name its peer.
+
+    BC-WAKE-008/017/018 are blocked on this and not on cryptography: there was
+    nothing to sign *as*, because a reply's only identifier was the source name
+    it was addressed from.
+    """
+    from agent_waked.outbox import Outbox
+
+    cfg = _two_session_config()
+    outbox = Outbox(cfg)
+    assert outbox.peer_identity("ops", "dev-a") == {
+        "destination": "dev-a",
+        "principal": "agent:dev",
+    }
+    # Nothing is fabricated when the reply names no destination: an invented
+    # identity on an attribution field is worse than an absent one.
+    assert outbox.peer_identity("ops", None) == {}
+    assert outbox.peer_identity("ops", "nonexistent") == {"destination": "nonexistent"}
+
+
+@pytest.mark.asyncio
+async def test_reply_cannot_claim_a_destination_the_connection_does_not_serve(
+    tmp_path,
+):
+    """An adapter must not attribute its reply to somebody else's principal."""
+
+    class _Outbox:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def deliver(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return {
+                "reply_id": kwargs["reply_id"],
+                "status": "no_callback",
+                "http_status": None,
+                "error": None,
+            }
+
+    cfg = _two_session_config()
+    router = Router(cfg)
+    outbox = _Outbox()
+    server = SocketServer(tmp_path / "sock", router, outbox=outbox)  # type: ignore[arg-type]
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(tmp_path / "sock"))
+        writer.write(
+            encode_frame(
+                {
+                    "type": "hello",
+                    "v": 1,
+                    "adapter": "opencode",
+                    "instance": "oc",
+                    "destinations": ["dev-a"],
+                }
+            )
+        )
+        await writer.drain()
+        json.loads(await asyncio.wait_for(reader.readline(), timeout=2))
+
+        # Claiming the sibling's destination is refused, non-fatally.
+        writer.write(
+            encode_frame(
+                {
+                    "type": "reply",
+                    "reply_id": "r1",
+                    "source": "ops",
+                    "in_reply_to": "ev-1",
+                    "content": "done",
+                    "destination": "dev-b",
+                }
+            )
+        )
+        await writer.drain()
+        err = json.loads(await asyncio.wait_for(reader.readline(), timeout=2))
+        assert err["type"] == "error"
+        assert err["code"] == "unauthorized_destination"
+        assert err["fatal"] is False
+        assert outbox.calls == []
+
+        # Its own destination is fine, and reaches the outbox.
+        writer.write(
+            encode_frame(
+                {
+                    "type": "reply",
+                    "reply_id": "r2",
+                    "source": "ops",
+                    "in_reply_to": "ev-1",
+                    "content": "done",
+                    "destination": "dev-a",
+                }
+            )
+        )
+        await writer.drain()
+        result = json.loads(await asyncio.wait_for(reader.readline(), timeout=2))
+        assert result["type"] == "reply_result"
+        assert outbox.calls[0]["destination"] == "dev-a"
+        writer.close()
+    finally:
+        server.close()

@@ -420,12 +420,33 @@ class SocketServer:
                 conn._writer, "bad_frame", f"reply missing field {exc}", fatal=False
             )
             return
+        # Which addressee is replying. Optional on the wire, but when a frame
+        # claims one it must be a destination this connection actually serves:
+        # otherwise an adapter could attribute its reply to somebody else's
+        # principal, which is precisely the "who is the peer on the way out"
+        # gap the outbound-auth items (BC-WAKE-008/017/018) are blocked on.
+        destination = frame.get("destination")
+        if isinstance(destination, str) and destination not in conn.destinations:
+            log.warning(
+                "reply claimed destination %r which session_id=%s does not "
+                "serve; rejecting",
+                destination,
+                conn.session_id,
+            )
+            await self._send_error(
+                conn._writer,
+                "unauthorized_destination",
+                f"this connection does not serve destination {destination!r}",
+                fatal=False,
+            )
+            return
         try:
             result = await self._outbox.deliver(
                 source=source,
                 reply_id=reply_id,
                 in_reply_to=in_reply_to,
                 content=content,
+                destination=destination if isinstance(destination, str) else None,
             )
         except Exception as exc:
             log.warning("reply delivery failed: %s", exc)

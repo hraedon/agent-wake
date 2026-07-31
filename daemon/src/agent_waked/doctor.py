@@ -171,9 +171,9 @@ def _check_secrets_resolvable() -> tuple[str, str]:
     not the component that signs; the daemon is.  The doctor is routinely run
     from a context that cannot see per-source secrets — the suite's scheduled
     ``agent-suite-doctor-alert.service`` runs as ``root`` with only
-    ``/etc/agent-suite/suite.env`` loaded, and per
-    ``docs/secrets-instantiation.md`` per-host signing material must never be
-    copied into that shared file.  Treating "I cannot see the secret" as "the
+    ``/etc/agent-suite/suite.env`` loaded, and per agent-suite
+    ``docs/secrets-vault.md`` per-host signing material must never be copied
+    into that shared file.  Treating "I cannot see the secret" as "the
     component is broken" made that hourly check report a healthy estate red
     every single run, which trains operators to ignore the channel — strictly
     worse than silence, and it would have made the Lane F red-alert-delivery
