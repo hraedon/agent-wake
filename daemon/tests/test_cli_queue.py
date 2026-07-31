@@ -529,3 +529,18 @@ async def test_redrive_human_delivery_failure_is_retryable(tmp_path, monkeypatch
             store.close()
     finally:
         await http.close()
+
+
+def test_dead_letter_list_text_columns_stay_aligned(store, capsys):
+    """"human_delivery" is 14 chars; a 13-wide KIND column shifted every row."""
+    store.dead_letter(
+        kind="human_delivery",
+        source="dossier",
+        ref_id="ev-h1",
+        payload=_human_dl_payload(),
+    )
+    code, out, _ = _run(capsys, "dead-letter", "list")
+    assert code == 0
+    header, row = out.splitlines()[0], out.splitlines()[1]
+    assert header.index("SOURCE") == row.index("dossier")
+    assert header.index("REF") == row.index("ev-h1")

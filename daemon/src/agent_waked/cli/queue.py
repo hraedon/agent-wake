@@ -159,12 +159,16 @@ def _cmd_dead_letter_list(args: argparse.Namespace) -> int:
             return _emit(True, {"ok": True, "dead_letters": rows}, "")
         if not rows:
             return _emit(False, {}, "No dead-lettered deliveries.")
+        # Column widths are derived from the data, not guessed: "human_delivery"
+        # is 14 characters and overflowed the old 13-wide KIND column, shifting
+        # every field after it out of alignment.
+        kind_w = max(len("KIND"), *(len(k) for k in DEAD_LETTER_KINDS))
         lines = [
-            f"{'ID':28} {'KIND':13} {'SOURCE':16} {'REF':26} CREATED",
+            f"{'ID':28} {'KIND':{kind_w}} {'SOURCE':16} {'REF':26} CREATED",
         ]
         for r in rows:
             lines.append(
-                f"{r['id']:28} {r['kind']:13} {r['source'][:16]:16} "
+                f"{r['id']:28} {r['kind']:{kind_w}} {r['source'][:16]:16} "
                 f"{r['ref_id'][:26]:26} {r['created_at']}"
             )
             if r.get("error"):
