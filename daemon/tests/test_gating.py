@@ -67,3 +67,24 @@ def test_identity_empty_allowlist_accepts():
     """Empty list is treated as no allowlist (backward-compat)."""
     cfg = {"secret": b"x", "allowed_trigger_identities": []}
     assert check_trigger_identity(cfg, "anyone") is None
+
+
+def test_string_allowed_trigger_identities_denies_instead_of_substring_matching():
+    """Defence in depth: the predicate must not trust its caller's validation.
+
+    ``header not in allowed`` is a membership test on a list but a *substring*
+    test on a string, so "alice" would admit "ali". config.load_config rejects
+    the shape at startup, but this predicate is also called with hand-built
+    dicts, so it has to be safe on its own.
+    """
+    cfg = {"secret": b"x", "allowed_trigger_identities": "alice"}
+    assert check_trigger_identity(cfg, "ali") == "identity_not_allowed"
+    assert check_trigger_identity(cfg, "alice") == "identity_not_allowed"
+    assert check_trigger_identity(cfg, "e") == "identity_not_allowed"
+
+
+def test_list_allowed_trigger_identities_still_works():
+    """The string guard must not break the supported list path."""
+    cfg = {"secret": b"x", "allowed_trigger_identities": ["alice", "bob"]}
+    assert check_trigger_identity(cfg, "alice") is None
+    assert check_trigger_identity(cfg, "ali") == "identity_not_allowed"

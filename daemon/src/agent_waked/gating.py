@@ -2,7 +2,10 @@
 
 import hashlib
 import hmac
+import logging
 from typing import Any
+
+log = logging.getLogger("agent_waked.gating")
 
 
 def verify_signature_any(
@@ -84,6 +87,19 @@ def check_trigger_identity(
     allowed = source_cfg.get("allowed_trigger_identities")
     if not allowed:
         return None
+
+    if isinstance(allowed, str):
+        # ``header not in allowed`` is a *substring* test on a string: "alice"
+        # would admit the sender "ali". config.load_config rejects this shape at
+        # startup, but this predicate is also called with hand-built dicts (the
+        # legacy inline-secret test path, and any future caller), so it must not
+        # depend on its caller having been validated. Deny rather than guess.
+        log.error(
+            "source has a string 'allowed_trigger_identities' (%r); expected a "
+            "list — denying rather than substring-matching",
+            allowed,
+        )
+        return "identity_not_allowed"
 
     if not sender_identity_header:
         return "identity_missing"
