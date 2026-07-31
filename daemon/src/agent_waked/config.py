@@ -209,11 +209,33 @@ def load_config() -> dict[str, Any]:
                         f"'allowed_target_principals' must be a non-empty string."
                     )
 
+        # A bare string here would silently become a *substring* allowlist:
+        # gating.check_trigger_identity does ``header not in allowed``, so
+        # "alice" as a string admits the sender "ali". Reject the shape at
+        # load rather than weakening authentication at request time.
+        allowed_identities = info.get("allowed_trigger_identities")
+        if allowed_identities is not None:
+            if not isinstance(allowed_identities, list):
+                raise ConfigError(
+                    f"Source {name!r}: 'allowed_trigger_identities' must be a "
+                    f"list of principal_id strings (got "
+                    f"{type(allowed_identities).__name__}). A bare string "
+                    f"would match any sender whose identity is a substring "
+                    f"of it."
+                )
+            for ident in allowed_identities:
+                if not isinstance(ident, str) or not ident:
+                    raise ConfigError(
+                        f"Source {name!r}: each entry in "
+                        f"'allowed_trigger_identities' must be a non-empty "
+                        f"string."
+                    )
+
         cfg["sources"][name] = {
             "secret_uris": secret_uris,
             "callback_url": info.get("callback_url") or cfg["default_callback_url"],
             "principal_id": info.get("principal_id"),
-            "allowed_trigger_identities": info.get("allowed_trigger_identities"),
+            "allowed_trigger_identities": allowed_identities,
             "allowed_target_principals": allowed_targets,
         }
 
