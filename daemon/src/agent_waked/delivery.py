@@ -18,12 +18,16 @@ deduplicate retries.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .channels.email import EmailChannel
 from .channels.webhook import WebhookChannel
 from .secrets.resolver import SecretResolver
+
+if TYPE_CHECKING:
+    from .store import WakeStore
 
 log = logging.getLogger("agent_waked.delivery")
 
@@ -71,6 +75,11 @@ class HumanDelivery:
     The daemon constructs one ``HumanDelivery`` with all registered channel
     adapters (webhook, email).  Each channel handles its own secret custody
     via the shared ``SecretResolver``.
+
+    When a ``WakeStore`` is supplied, a delivery that does not end
+    ``delivered`` is dead-lettered as ``kind="human_delivery"``, mirroring the
+    reply / next_session paths, so a routed alert that never landed survives a
+    restart and can be redriven (``agent-wake dead-letter redrive``).
     """
 
     def __init__(
@@ -79,10 +88,12 @@ class HumanDelivery:
         resolver: SecretResolver,
         health: DeliveryHealth | None = None,
         channels: dict[str, Any] | None = None,
+        store: WakeStore | None = None,
     ) -> None:
         self._config = config
         self._resolver = resolver
         self._health = health or DeliveryHealth()
+        self._store = store
         if channels is not None:
             self._channels = channels
         else:
@@ -90,6 +101,60 @@ class HumanDelivery:
                 "webhook": WebhookChannel(),
                 "email": EmailChannel(),
             }
+
+    def _dead_letter(
+        self,
+        *,
+        event: dict[str, Any],
+        principal_id: str,
+        error: str,
+    ) -> str | None:
+        """Persist a permanently-failed human delivery for operator redrive.
+
+        Without this, a channel that never recovers left nothing but an
+        in-memory health entry lost on restart — a routed alert could vanish
+        with no durable trace.
+
+        **Never raises.** Every caller is on a path that has already failed;
+        this is the last line of defence, and a last line of defence that can
+        itself throw turns a failed delivery into an unhandled exception in a
+        background task. Two real cases: the store was closed under us (a
+        shutdown race — ``sqlite3.ProgrammingError``), or the write lost the
+        lock race past sqlite's busy timeout (``OperationalError: database is
+        locked``). Both are logged loudly with the identifying metadata; the
+        event body is deliberately *not* logged, because dead-letter payloads
+        carry user content and log sinks are not the durable store.
+
+        A transient lock is already covered by sqlite's connect-level busy
+        timeout (5s), so there is no retry loop here — a failure at this point
+        means the store is genuinely unavailable, not merely contended.
+        """
+        if self._store is None:
+            return None
+        source = str(event.get("source", ""))
+        ref_id = str(event.get("event_id", ""))
+        try:
+            return self._store.dead_letter(
+                kind="human_delivery",
+                source=source,
+                ref_id=ref_id,
+                payload={"event": event, "principal_id": principal_id},
+                error=error,
+                attempts=1,
+            )
+        except Exception as exc:
+            log.error(
+                "LOST ALERT: could not dead-letter human delivery "
+                "source=%s event_id=%s principal_id=%s delivery_error=%r "
+                "store_error=%s",
+                source,
+                ref_id,
+                principal_id,
+                error,
+                exc,
+                exc_info=exc,
+            )
+            return None
 
     @property
     def health(self) -> DeliveryHealth:
@@ -145,49 +210,78 @@ class HumanDelivery:
                 principal_id,
                 event.get("event_id", "?"),
             )
+            self._dead_letter(
+                event=event,
+                principal_id=principal_id,
+                error="principal has no delivery channels configured",
+            )
             return {"status": "no_channels", "principal_id": principal_id}
 
         results: list[dict[str, Any]] = []
         any_delivered = False
         any_failed = False
 
-        for kind, ch_cfg in channels_cfg.items():
-            channel = self._channels.get(kind)
-            if channel is None:
-                log.error(
-                    "no adapter registered for channel kind %r (principal %r)",
-                    kind,
-                    principal_id,
-                )
-                any_failed = True
-                self._health.record_failure(kind, principal_id, "no adapter")
-                results.append(
-                    {"channel": kind, "status": "failed", "error": "no adapter"}
-                )
-                continue
+        try:
+            for kind, ch_cfg in channels_cfg.items():
+                channel = self._channels.get(kind)
+                if channel is None:
+                    log.error(
+                        "no adapter registered for channel kind %r (principal %r)",
+                        kind,
+                        principal_id,
+                    )
+                    any_failed = True
+                    self._health.record_failure(kind, principal_id, "no adapter")
+                    results.append(
+                        {"channel": kind, "status": "failed", "error": "no adapter"}
+                    )
+                    continue
 
-            try:
-                result = await channel.deliver(event, ch_cfg, self._resolver)
-            except Exception as exc:
-                log.exception(
-                    "channel %r raised for principal %r: %s",
-                    kind,
-                    principal_id,
-                    exc,
-                )
-                result = {"status": "failed", "error": str(exc)}
+                try:
+                    result = await channel.deliver(event, ch_cfg, self._resolver)
+                except Exception as exc:
+                    log.exception(
+                        "channel %r raised for principal %r: %s",
+                        kind,
+                        principal_id,
+                        exc,
+                    )
+                    result = {"status": "failed", "error": str(exc)}
 
-            status = result.get("status", "unknown")
-            if status == "delivered":
-                self._health.record_success(kind, principal_id)
-                any_delivered = True
-            else:
-                self._health.record_failure(
-                    kind, principal_id, result.get("error", status)
-                )
-                any_failed = True
+                status = result.get("status", "unknown")
+                if status == "delivered":
+                    self._health.record_success(kind, principal_id)
+                    any_delivered = True
+                else:
+                    self._health.record_failure(
+                        kind, principal_id, result.get("error", status)
+                    )
+                    any_failed = True
 
-            results.append({"channel": kind, **result})
+                results.append({"channel": kind, **result})
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException: it does not pass through the
+            # ``except Exception`` above, and without this arm a SIGTERM while
+            # a channel sits in 1s/4s/16s backoff cancelled the task and the
+            # alert left *no* durable trace — precisely the gap the
+            # dead-letter table exists to close. The store write is
+            # synchronous, so it completes before the cancellation is
+            # re-raised; the daemon's shutdown order guarantees the store is
+            # still open at this point (see main._run).
+            delivered = [
+                r.get("channel", "?")
+                for r in results
+                if r.get("status") == "delivered"
+            ]
+            self._dead_letter(
+                event=event,
+                principal_id=principal_id,
+                error=(
+                    "human delivery cancelled mid-flight (daemon shutdown); "
+                    f"delivered channels={delivered}"
+                ),
+            )
+            raise
 
         if any_delivered and not any_failed:
             overall = "delivered"
@@ -195,6 +289,18 @@ class HumanDelivery:
             overall = "partial"
         else:
             overall = "failed"
+
+        if overall != "delivered":
+            failed_channels = [
+                r.get("channel", "?")
+                for r in results
+                if r.get("status") != "delivered"
+            ]
+            self._dead_letter(
+                event=event,
+                principal_id=principal_id,
+                error=f"human delivery {overall}: failed channels={failed_channels}",
+            )
 
         return {
             "status": overall,

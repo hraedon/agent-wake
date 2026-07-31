@@ -298,7 +298,9 @@ async def _run() -> int:
     router = Router(cfg, store=store)
     resolver = SecretResolver(vault_cfg=cfg.get("vault"))
 
-    delivery = HumanDelivery(cfg, resolver)
+    # store=store: a human-directed delivery that never lands is dead-lettered
+    # rather than leaving only an in-memory health entry lost on restart.
+    delivery = HumanDelivery(cfg, resolver, store=store)
 
     outbox = Outbox(cfg, store=store)
     await outbox.start()
@@ -355,16 +357,51 @@ async def _run() -> int:
             _reload_config(cfg, router, resolver=resolver)
 
     log.info("shutting down")
+    await _shutdown(
+        socket_server=socket_server,
+        runner=runner,
+        outbox=outbox,
+        delivery=delivery,
+        store=store,
+    )
+    return 0
+
+
+async def _shutdown(
+    *,
+    socket_server: SocketServer,
+    runner: web.AppRunner,
+    outbox: Outbox,
+    delivery: HumanDelivery,
+    store: WakeStore | None,
+) -> None:
+    """Tear the daemon down in the one order that keeps durability.
+
+    This used to be inline and it used to be wrong: the store was closed
+    *before* ``runner.cleanup()``, so an in-flight human delivery still sitting
+    in 1s/4s/16s retry backoff either wrote its dead-letter into a closed
+    connection (``sqlite3.ProgrammingError``) or was cancelled with nothing
+    recorded at all — losing exactly the alerts the dead-letter table exists to
+    preserve. Extracted so the ordering is a named, testable invariant rather
+    than a property of statement order in a 100-line function.
+
+    1. Stop accepting new work — unix socket, then the HTTP listener.
+    2. Drain (then cancel) in-flight deliveries. The ingest app's
+       ``on_shutdown`` hook does this inside ``runner.cleanup()``, and the
+       cancellation arm of ``HumanDelivery.deliver`` writes its dead-letter
+       while the store is still open.
+    3. Close the outbound HTTP sessions, once nothing is using them.
+    4. Close the store LAST, once nothing can still want to write to it.
+    """
     socket_server.close()
-    await outbox.close()
-    await delivery.close()
-    if store is not None:
-        store.close()
     try:
         await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
     except TimeoutError:
         log.warning("runner cleanup timed out after %ds", _DRAIN_TIMEOUT)
-    return 0
+    await outbox.close()
+    await delivery.close()
+    if store is not None:
+        store.close()
 
 
 def main() -> int:

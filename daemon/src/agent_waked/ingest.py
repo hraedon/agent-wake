@@ -26,6 +26,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("agent_waked.ingest")
 
+# How long shutdown waits for in-flight human deliveries before cancelling
+# them. Deliberately shorter than a full webhook retry ladder (1s+4s+16s plus
+# per-attempt timeouts): a delivery still in backoff when the daemon is asked
+# to stop is cancelled, and ``HumanDelivery.deliver`` dead-letters on
+# cancellation, so the alert is preserved durably rather than by making
+# shutdown hang for a minute. Must stay below ``main._DRAIN_TIMEOUT``, which
+# bounds the whole ``runner.cleanup()`` this drain runs inside.
+_DELIVERY_DRAIN_TIMEOUT = 3.0
+
 
 class SourceMismatchError(ValueError):
     """Raised when the body's claimed source does not match the authenticated header source.
@@ -160,8 +169,60 @@ def create_ingest_app(
     dedupe = Dedupe(store=store)
     # RUF006: an ``ensure_future`` task nobody holds a reference to can be
     # garbage-collected mid-flight, silently dropping the delivery. Same
-    # treatment as ``Router._background_tasks``.
+    # treatment as ``Router._background_tasks``. The set is also what lets
+    # shutdown drain in-flight deliveries before the store closes.
     delivery_tasks: set[asyncio.Task[Any]] = set()
+
+    def _on_delivery_done(task: asyncio.Task[Any]) -> None:
+        delivery_tasks.discard(task)
+        if task.cancelled():
+            # ``task.exception()`` *raises* CancelledError on a cancelled
+            # task, so this guard is not cosmetic: without it every shutdown
+            # raised out of the done-callback. Cancellation is not a lost
+            # alert — HumanDelivery.deliver dead-letters on its way out.
+            log.warning("human delivery task cancelled (shutdown?)")
+            return
+        exc = task.exception()
+        if exc is not None:
+            # exc_info=exc, not log.exception(): this callback runs outside
+            # any except block, where implicit exc_info is empty and the
+            # traceback — the only reason to log here — is lost.
+            log.error("human delivery task crashed: %s", exc, exc_info=exc)
+
+    async def _drain_delivery_tasks(_app: web.Application) -> None:
+        """Let in-flight human deliveries finish before the store closes.
+
+        Registered on ``app.on_shutdown``, so ``AppRunner.cleanup()`` runs it
+        — and ``main._run`` closes the store *after* that cleanup. Anything
+        still in retry backoff when the grace period expires is cancelled,
+        which routes it to the dead-letter arm in ``HumanDelivery.deliver``.
+        """
+        if not delivery_tasks:
+            return
+        pending = list(delivery_tasks)
+        log.info(
+            "draining %d in-flight human deliver%s (grace %.0fs)",
+            len(pending),
+            "y" if len(pending) == 1 else "ies",
+            _DELIVERY_DRAIN_TIMEOUT,
+        )
+        _, still_running = await asyncio.wait(
+            pending, timeout=_DELIVERY_DRAIN_TIMEOUT
+        )
+        if not still_running:
+            return
+        log.warning(
+            "cancelling %d human deliver%s still in retry backoff; they are "
+            "dead-lettered for redrive",
+            len(still_running),
+            "y" if len(still_running) == 1 else "ies",
+        )
+        for task in still_running:
+            task.cancel()
+        # Wait for the cancellations to actually land: the dead-letter write
+        # happens in the tasks' CancelledError handlers, and the store must
+        # still be open when it does.
+        await asyncio.wait(still_running)
 
     async def post_root(request: web.Request) -> web.Response:
         raw_body = await request.read()
@@ -284,7 +345,7 @@ def create_ingest_app(
                     )
                 task = asyncio.ensure_future(delivery.deliver(event))
                 delivery_tasks.add(task)
-                task.add_done_callback(delivery_tasks.discard)
+                task.add_done_callback(_on_delivery_done)
                 delivery_result = {
                     "status": "dispatched",
                     "principal_id": principal_id,
@@ -326,6 +387,12 @@ def create_ingest_app(
         return _json_response(200, body)
 
     app = web.Application()
+    # The ignore below is an upstream typing mismatch: aiohttp declares its
+    # signals as ``Signal[Callable[[Application], Awaitable[None]]]``, but
+    # aiosignal's Signal is now variadic (``Signal[*Ts]``), so that declared
+    # element type collapses to a callable *taking* a handler. The runtime
+    # contract is the documented one.
+    app.on_shutdown.append(_drain_delivery_tasks)  # type: ignore[arg-type]
     app.router.add_get("/", health_handler)
     app.router.add_post("/", post_root)
     app.router.add_route("*", "/{path:.*}", default_handler)

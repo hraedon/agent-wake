@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -672,3 +673,208 @@ async def test_health_reports_store_counters(tmp_path):
     finally:
         await cli.close()
         store.close()
+
+
+# ── the delivery task's done-callback and shutdown drain (WI-001) ─────
+
+
+def _delivery_config(target: str = "operator") -> dict:
+    return {
+        "sources": {
+            "test": {
+                "secret": b"shhh",
+                "callback_url": None,
+                "allowed_target_principals": [target],
+            },
+        },
+        "delivery": {
+            target: {"webhook": {
+                "url": "https://hooks.example.com/inbox",
+                "secret_uri": "env://WH",
+            }},
+        },
+        "routing": {},
+    }
+
+
+async def _post_delivery_event(cli, event_id: str = "evt-del-1") -> None:
+    body = _delivery_event("operator", event_id=event_id)
+    sig = "sha256=" + hmac.new(b"shhh", body, hashlib.sha256).hexdigest()
+    resp = await cli.post("/", data=body, headers={
+        "X-AgentWake-Source": "test",
+        "X-AgentWake-Signature": sig,
+    })
+    assert resp.status == 202
+
+
+@pytest.mark.asyncio
+async def test_delivery_task_crash_is_logged_with_a_traceback(caplog):
+    """A crashing delivery task must leave a traceback, not just a message.
+
+    The callback runs outside any ``except`` block, so ``log.exception`` there
+    records ``NoneType: None`` — the traceback has to be passed explicitly.
+    """
+    from agent_waked.delivery import HumanDelivery
+
+    config = _delivery_config()
+    delivery = HumanDelivery(config, _FakeResolver())
+
+    async def _boom(event):
+        raise RuntimeError("delivery exploded")
+
+    delivery.deliver = _boom  # type: ignore[method-assign]
+
+    app = create_ingest_app(config, MockRouter(), delivery=delivery)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        with caplog.at_level(logging.ERROR, logger="agent_waked.ingest"):
+            await _post_delivery_event(cli)
+            await asyncio.sleep(0.05)
+        records = [
+            r for r in caplog.records
+            if "human delivery task crashed" in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert isinstance(records[0].exc_info[1], RuntimeError)
+        assert "delivery exploded" in caplog.text
+        assert "RuntimeError" in caplog.text  # the traceback made it out
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_task_cancel_does_not_raise_from_the_callback(caplog):
+    """``task.exception()`` raises on a cancelled task — the guard is load-bearing.
+
+    Before the ``task.cancelled()`` check, every shutdown with a delivery in
+    flight raised CancelledError out of the done-callback and into the loop's
+    exception handler.
+    """
+    from agent_waked.delivery import HumanDelivery
+
+    config = _delivery_config()
+    delivery = HumanDelivery(config, _FakeResolver())
+    started = asyncio.Event()
+
+    async def _hang(event):
+        started.set()
+        await asyncio.sleep(30)
+        return {"status": "delivered"}
+
+    delivery.deliver = _hang  # type: ignore[method-assign]
+
+    loop_errors: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda loop, context: loop_errors.append(context)
+    )
+
+    app = create_ingest_app(config, MockRouter(), delivery=delivery)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent_waked.ingest"):
+            await _post_delivery_event(cli)
+            await asyncio.wait_for(started.wait(), timeout=2)
+            # This is what shutdown does.
+            await app.shutdown()
+        assert "cancelled" in caplog.text
+        assert loop_errors == []
+    finally:
+        asyncio.get_running_loop().set_exception_handler(None)
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_a_finishing_delivery():
+    """A delivery that completes inside the grace period is not cancelled."""
+    from agent_waked.delivery import HumanDelivery
+
+    config = _delivery_config()
+    delivery = HumanDelivery(config, _FakeResolver())
+    finished: list[str] = []
+    started = asyncio.Event()
+
+    async def _slow(event):
+        started.set()
+        await asyncio.sleep(0.1)
+        finished.append(event["event_id"])
+        return {"status": "delivered"}
+
+    delivery.deliver = _slow  # type: ignore[method-assign]
+
+    app = create_ingest_app(config, MockRouter(), delivery=delivery)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        await _post_delivery_event(cli)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await app.shutdown()
+        assert finished == ["evt-del-1"]
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_a_stuck_delivery_and_it_is_dead_lettered(tmp_path):
+    """The whole point of the drain: an alert stuck in backoff still lands.
+
+    A real HumanDelivery (not a stub) with a channel that hangs, so the
+    cancellation arm of ``deliver`` runs against a still-open store — which is
+    what the daemon's shutdown ordering guarantees.
+    """
+    from agent_waked.delivery import HumanDelivery
+    from agent_waked.ingest import _DELIVERY_DRAIN_TIMEOUT
+    from agent_waked.store import WakeStore
+
+    class HangingChannel:
+        name = "webhook"
+
+        def __init__(self):
+            self.started = asyncio.Event()
+
+        async def deliver(self, event, channel_cfg, resolver):
+            self.started.set()
+            await asyncio.sleep(60)  # as a webhook does in 16s backoff
+            return {"status": "failed"}
+
+        async def close(self):
+            return None
+
+    config = _delivery_config()
+    channel = HangingChannel()
+    store = WakeStore(tmp_path / "state.db")
+    try:
+        delivery = HumanDelivery(
+            config, _FakeResolver(), channels={"webhook": channel}, store=store
+        )
+        app = create_ingest_app(config, MockRouter(), delivery=delivery, store=store)
+        cli = TestClient(TestServer(app))
+        await cli.start_server()
+        try:
+            await _post_delivery_event(cli)
+            await asyncio.wait_for(channel.started.wait(), timeout=2)
+            await asyncio.wait_for(
+                app.shutdown(), timeout=_DELIVERY_DRAIN_TIMEOUT + 5
+            )
+            entries = store.list_dead_letters(kind="human_delivery")
+            assert len(entries) == 1
+            assert "cancelled" in (entries[0].error or "")
+            assert entries[0].ref_id == "evt-del-1"
+        finally:
+            await cli.close()
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_with_no_deliveries_is_a_no_op():
+    config = _delivery_config()
+    app = create_ingest_app(config, MockRouter())
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        await app.shutdown()
+    finally:
+        await cli.close()
