@@ -173,6 +173,13 @@ single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
 - A replayed `event_id` is rejected **across daemon restarts**, not just within
   one process lifetime.
 - A reply whose callback permanently fails is dead-lettered and can be resent.
+- A human-directed alert that never reached its principal is dead-lettered too
+  (`kind=human_delivery`), including one cut short by a daemon restart, and can
+  be re-dispatched with `dead-letter redrive`.
+- The dead-letter table is bounded like the others. Entries hold full event
+  bodies, so they expire after `dead_letter_ttl_seconds` and are capped at
+  `dead_letter_max_rows` (already-redriven entries evicted first). Evicting an
+  entry nobody redrove is logged as a warning.
 
 ```jsonc
 // config.json
@@ -184,7 +191,9 @@ single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
   "dedupe_max_rows": 100000,
   "pending_ttl_seconds": 604800,
   "pending_max_rows": 10000,
-  "pending_max_attempts": 5
+  "pending_max_attempts": 5,
+  "dead_letter_ttl_seconds": 2592000,
+  "dead_letter_max_rows": 5000
 }
 ```
 
@@ -195,7 +204,9 @@ agent-wake pending list                  # what is queued for the next session
 agent-wake pending prune                 # apply retention now
 agent-wake dead-letter list              # what failed permanently, and why
 agent-wake dead-letter show <id>         # the full payload
-agent-wake dead-letter redrive <id>      # resend it (replies) / requeue it (events)
+agent-wake dead-letter list --kind human_delivery   # undelivered human alerts
+agent-wake dead-letter redrive <id>      # resend it (replies, human alerts) /
+                                         # requeue it (next-session events)
 agent-wake dead-letter purge --older-than-days 30
 ```
 

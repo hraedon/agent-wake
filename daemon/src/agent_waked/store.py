@@ -34,6 +34,13 @@ every ``_PRUNE_INTERVAL`` inserts, so no single ingest pays the full cost.
 Pending (next-session) rows expire after ``pending_ttl_seconds`` and are
 moved to the dead-letter table rather than deleted, so an event is never
 lost silently.
+
+The dead-letter table is bounded the same way, by ``dead_letter_ttl_seconds``
+(30 days, deliberately generous — nobody looks at a dead-letter the same day)
+and ``dead_letter_max_rows``.  It has to be: rows carry full event bodies, and
+both expired pending events and failed human deliveries add to it, so an
+unattended daemon would grow the state db forever.  Evicting a row that was
+never redriven is real data loss and is logged at warning.
 """
 
 from __future__ import annotations
@@ -59,6 +66,14 @@ DEFAULT_DEDUPE_MAX_ROWS = 100_000
 DEFAULT_PENDING_TTL_SECONDS = 7 * 24 * 3600
 DEFAULT_PENDING_MAX_ROWS = 10_000
 DEFAULT_PENDING_MAX_ATTEMPTS = 5
+# Dead-letter retention. Longer than the dedupe/pending windows on purpose: a
+# dead-letter is the record of something that already went wrong, and an
+# operator may not look for a week. But it is not unbounded — rows carry full
+# event bodies, and every expired pending event and every failed human
+# delivery adds one, so an unattended daemon would otherwise grow the state db
+# without limit.
+DEFAULT_DEAD_LETTER_TTL_SECONDS = 30 * 24 * 3600
+DEFAULT_DEAD_LETTER_MAX_ROWS = 5_000
 
 # Amortised pruning: run the retention sweep once every N dedupe inserts.
 _PRUNE_INTERVAL = 256
@@ -193,6 +208,8 @@ class WakeStore:
         pending_ttl_seconds: float = DEFAULT_PENDING_TTL_SECONDS,
         pending_max_rows: int = DEFAULT_PENDING_MAX_ROWS,
         pending_max_attempts: int = DEFAULT_PENDING_MAX_ATTEMPTS,
+        dead_letter_ttl_seconds: float = DEFAULT_DEAD_LETTER_TTL_SECONDS,
+        dead_letter_max_rows: int = DEFAULT_DEAD_LETTER_MAX_ROWS,
     ):
         self.path = Path(path)
         self.dedupe_ttl_seconds = float(dedupe_ttl_seconds)
@@ -200,6 +217,8 @@ class WakeStore:
         self.pending_ttl_seconds = float(pending_ttl_seconds)
         self.pending_max_rows = int(pending_max_rows)
         self.pending_max_attempts = int(pending_max_attempts)
+        self.dead_letter_ttl_seconds = float(dead_letter_ttl_seconds)
+        self.dead_letter_max_rows = int(dead_letter_max_rows)
 
         self._lock = threading.Lock()
         self._inserts_since_prune = 0
@@ -474,6 +493,19 @@ class WakeStore:
         Expired pending events are dead-lettered, not dropped: "we never got a
         session for this in N days" is exactly the thing an operator needs to
         see.
+
+        The dead-letter table is swept too, which it was not before: it grew
+        without limit while holding full event bodies, and nothing but a manual
+        ``dead-letter purge`` ever removed a row. Rows past
+        ``dead_letter_ttl_seconds`` go first, then the oldest rows above
+        ``dead_letter_max_rows``, already-redriven ones preferentially. Dropping
+        an entry that was never redriven is data loss, so it is logged at
+        warning — the cap is a backstop against an unbounded state db, not a
+        retention policy an operator should be relying on.
+
+        Sweep order matters: the dead-letter sweep runs *before* expired
+        pending events are dead-lettered, so a row created by this same call is
+        never immediately eligible for its own cap eviction.
         """
         now = time.time()
         expired_pending: list[PendingEvent] = []
@@ -503,8 +535,49 @@ class WakeStore:
                 self._conn.execute(
                     "DELETE FROM pending WHERE expires_at <= ?", (now,)
                 )
+
+            cur = self._conn.execute(
+                "DELETE FROM dead_letter WHERE created_at < ?",
+                (now - self.dead_letter_ttl_seconds,),
+            )
+            dead_letter_ttl_deleted = int(cur.rowcount)
+
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM dead_letter"
+            ).fetchone()
+            dl_overflow = int(row["n"]) - self.dead_letter_max_rows
+            dead_letter_cap_deleted = 0
+            unredriven_evicted = 0
+            if dl_overflow > 0:
+                # Oldest first, but spend the redriven rows before the ones an
+                # operator has not dealt with yet.
+                victims = self._conn.execute(
+                    "SELECT id, redrive_status FROM dead_letter "
+                    "ORDER BY (redrive_status = 'ok') DESC, created_at ASC "
+                    "LIMIT ?",
+                    (dl_overflow,),
+                ).fetchall()
+                unredriven_evicted = sum(
+                    1 for v in victims if v["redrive_status"] != "ok"
+                )
+                self._conn.executemany(
+                    "DELETE FROM dead_letter WHERE id = ?",
+                    [(v["id"],) for v in victims],
+                )
+                dead_letter_cap_deleted = len(victims)
+
             self._conn.commit()
             self._inserts_since_prune = 0
+
+        if unredriven_evicted:
+            log.warning(
+                "dead-letter cap (%d rows) evicted %d entr%s that were never "
+                "redriven — deliveries have been permanently lost; raise "
+                "state.dead_letter_max_rows or redrive/purge more often",
+                self.dead_letter_max_rows,
+                unredriven_evicted,
+                "y" if unredriven_evicted == 1 else "ies",
+            )
 
         for pe in expired_pending:
             self.dead_letter(
@@ -522,6 +595,8 @@ class WakeStore:
         result = {
             "dedupe_ttl_deleted": dedupe_ttl_deleted,
             "dedupe_cap_deleted": dedupe_cap_deleted,
+            "dead_letter_ttl_deleted": dead_letter_ttl_deleted,
+            "dead_letter_cap_deleted": dead_letter_cap_deleted,
             "pending_expired": len(expired_pending),
         }
         if any(result.values()):
@@ -568,5 +643,11 @@ def open_store(cfg: dict[str, Any] | None = None) -> WakeStore:
         pending_max_rows=state_cfg.get("pending_max_rows", DEFAULT_PENDING_MAX_ROWS),
         pending_max_attempts=state_cfg.get(
             "pending_max_attempts", DEFAULT_PENDING_MAX_ATTEMPTS
+        ),
+        dead_letter_ttl_seconds=state_cfg.get(
+            "dead_letter_ttl_seconds", DEFAULT_DEAD_LETTER_TTL_SECONDS
+        ),
+        dead_letter_max_rows=state_cfg.get(
+            "dead_letter_max_rows", DEFAULT_DEAD_LETTER_MAX_ROWS
         ),
     )

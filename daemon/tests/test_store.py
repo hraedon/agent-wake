@@ -8,11 +8,14 @@ Acceptance criteria (BC-WAKE-004 / BC-WAKE-012):
    than disappearing.
 """
 
+import logging
 import time
 
 import pytest
 
 from agent_waked.store import (
+    DEFAULT_DEAD_LETTER_MAX_ROWS,
+    DEFAULT_DEAD_LETTER_TTL_SECONDS,
     DEFAULT_DEDUPE_MAX_ROWS,
     StoreError,
     WakeStore,
@@ -273,3 +276,131 @@ def test_unopenable_store_raises_store_error(tmp_path):
     blocker.write_text("not a directory")
     with pytest.raises(StoreError):
         WakeStore(blocker / "sub" / "state.db")
+
+
+# ── dead-letter retention (WI-001) ────────────────────────────────────────────
+
+
+def test_dead_letter_ttl_retention(db_path):
+    """The dead-letter table used to grow forever; prune() never touched it."""
+    store = WakeStore(db_path, dead_letter_ttl_seconds=0.05)
+    try:
+        store.dead_letter(kind="reply", source="s", ref_id="old", payload={})
+        assert store.dead_letter_count() == 1
+        time.sleep(0.08)
+        result = store.prune()
+        assert result["dead_letter_ttl_deleted"] == 1
+        assert store.dead_letter_count() == 0
+    finally:
+        store.close()
+
+
+def test_dead_letter_row_cap_retention(db_path):
+    store = WakeStore(db_path, dead_letter_max_rows=5)
+    try:
+        for i in range(12):
+            store.dead_letter(
+                kind="reply", source="s", ref_id=f"r-{i:02d}", payload={"i": i}
+            )
+        result = store.prune()
+        assert result["dead_letter_cap_deleted"] == 7
+        remaining = {e.ref_id for e in store.list_dead_letters(limit=100)}
+        assert len(remaining) == 5
+        # The newest survived; the oldest were evicted.
+        assert "r-11" in remaining
+        assert "r-00" not in remaining
+    finally:
+        store.close()
+
+
+def test_dead_letter_cap_spends_redriven_rows_first(db_path):
+    """An entry an operator has not dealt with outlives one they have."""
+    store = WakeStore(db_path, dead_letter_max_rows=2)
+    try:
+        redriven = [
+            store.dead_letter(kind="reply", source="s", ref_id=f"done-{i}", payload={})
+            for i in range(3)
+        ]
+        for dl_id in redriven:
+            store.mark_redriven(dl_id, "ok")
+        fresh = [
+            store.dead_letter(kind="reply", source="s", ref_id=f"todo-{i}", payload={})
+            for i in range(2)
+        ]
+        store.prune()
+        surviving = {
+            e.ref_id for e in store.list_dead_letters(limit=100, include_redriven=True)
+        }
+        assert surviving == {"todo-0", "todo-1"}
+        assert len(fresh) == 2
+    finally:
+        store.close()
+
+
+def test_dead_letter_cap_eviction_of_unredriven_rows_is_loud(db_path, caplog):
+    """Dropping an alert nobody handled is data loss; it must not be silent."""
+    store = WakeStore(db_path, dead_letter_max_rows=1)
+    try:
+        store.dead_letter(kind="reply", source="s", ref_id="a", payload={})
+        store.dead_letter(kind="reply", source="s", ref_id="b", payload={})
+        with caplog.at_level(logging.WARNING, logger="agent_waked.store"):
+            store.prune()
+        assert "never" in caplog.text and "redriven" in caplog.text
+    finally:
+        store.close()
+
+
+def test_dead_letter_cap_does_not_evict_rows_it_just_created(db_path):
+    """The pending→dead-letter promotion must not be undone by its own sweep."""
+    store = WakeStore(
+        db_path, pending_ttl_seconds=0.05, dead_letter_max_rows=1
+    )
+    try:
+        store.enqueue_pending(_event("ev-a"))
+        store.enqueue_pending(_event("ev-b"))
+        time.sleep(0.08)
+        result = store.prune()
+        assert result["pending_expired"] == 2
+        # Both promotions survive this sweep; the cap applies on the next one.
+        assert store.dead_letter_count() == 2
+    finally:
+        store.close()
+
+
+def test_amortised_prune_bounds_dead_letter_growth(db_path):
+    """Growth is bounded without an operator ever running `dead-letter purge`."""
+    store = WakeStore(db_path, dead_letter_max_rows=5)
+    try:
+        for i in range(20):
+            store.dead_letter(
+                kind="human_delivery",
+                source="dossier",
+                ref_id=f"ev-{i:02d}",
+                payload={"event": {"content": "x" * 512}, "principal_id": "operator"},
+            )
+        store.prune()
+        assert store.dead_letter_count(include_redriven=True) == 5
+    finally:
+        store.close()
+
+
+def test_dead_letter_retention_is_configurable(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+    store = open_store(
+        {"state": {"dead_letter_ttl_seconds": 60, "dead_letter_max_rows": 7}}
+    )
+    try:
+        assert store.dead_letter_ttl_seconds == 60
+        assert store.dead_letter_max_rows == 7
+    finally:
+        store.close()
+
+
+def test_dead_letter_retention_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+    store = open_store({})
+    try:
+        assert store.dead_letter_ttl_seconds == DEFAULT_DEAD_LETTER_TTL_SECONDS
+        assert store.dead_letter_max_rows == DEFAULT_DEAD_LETTER_MAX_ROWS
+    finally:
+        store.close()

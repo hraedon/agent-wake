@@ -251,6 +251,8 @@ _STATE_INT_FIELDS = (
     "pending_ttl_seconds",
     "pending_max_rows",
     "pending_max_attempts",
+    "dead_letter_ttl_seconds",
+    "dead_letter_max_rows",
 )
 
 
