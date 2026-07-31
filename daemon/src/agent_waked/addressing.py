@@ -344,33 +344,25 @@ def routed_destinations(cfg: dict[str, Any], sender_name: str) -> list[Destinati
 def out_of_band_principals(cfg: dict[str, Any], sender_name: str) -> set[str] | None:
     """Principals *sender_name* may address out-of-band (``meta.target``).
 
-    Returns ``None`` when the sender declares no authorization at all, which
-    the caller must treat as default-deny — the Plan 005 contract.
+    Returns ``None`` when the sender declares no authorization at all, which the
+    caller must treat as default-deny — the Plan 005 contract, unchanged.
 
-    Legacy-origin routes are deliberately excluded.  A migration that turned a
-    v1 ``routing`` entry into an out-of-band grant would hand an authenticated
-    sender the ability to make the daemon email a human, which its old config
-    did not permit.  Migrations may preserve authority; they may not mint it.
+    Deliberately **not** derived from routes, even though routes are what
+    authorise in-band delivery and even though both are "reach this principal".
+    The two are different capabilities and only one of them leaves the box:
+    waking an adapter session over a 0600 unix socket is local, while an
+    out-of-band channel sends a real email or POSTs to a URL the daemon resolves
+    — the surface ``netguard`` and the SSRF guards exist for.  Collapsing them
+    would buy one fewer key in a config file and pay for it by turning every
+    in-band route into egress authority, including on migration, where a v1
+    ``routing`` entry would silently become permission to email a human.
+    Migrations may preserve authority; they may not mint it.
     """
     entry = sender(cfg, sender_name) or {}
     declared = entry.get("allowed_target_principals")
-    allowed: set[str] = set()
-    have_declaration = False
     if isinstance(declared, list) and declared:
-        allowed.update(str(p) for p in declared)
-        have_declaration = True
-    for route in route_table(cfg):
-        if route.origin == ORIGIN_LEGACY:
-            continue
-        if route.sender not in (sender_name, "*"):
-            continue
-        have_declaration = True
-        if route.principal:
-            allowed.add(route.principal)
-        for dest in _expand(cfg, route):
-            if dest.principal:
-                allowed.add(dest.principal)
-    return allowed if have_declaration else None
+        return {str(p) for p in declared}
+    return None
 
 
 def resolve(

@@ -347,8 +347,15 @@ def load_config() -> dict[str, Any]:
         routes = _validate_routes_block(
             raw.get("routes"), cfg["senders"], destinations, principals
         )
+        # Only principals that actually have channels. The alias must mean
+        # exactly what the v1 ``delivery`` block meant — "principals with
+        # out-of-band delivery" — or the doctor's "principals without delivery
+        # channels" warning fires for every in-band-only principal, which under
+        # v2 is the common case and not a defect.
         delivery_alias = {
-            pid: entry["channels"] for pid, entry in principals.items()
+            pid: entry["channels"]
+            for pid, entry in principals.items()
+            if entry["channels"]
         }
     else:
         # Plan 005 WI-1.1 spelling: top-level ``delivery`` is a principal_id →

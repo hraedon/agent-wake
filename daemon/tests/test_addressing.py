@@ -641,14 +641,15 @@ def test_live_mvmcc03_shaped_config_still_loads(tmp_path, monkeypatch):
     assert [d.name for d in routed] == ["mvmcc03-claude"]
 
 
-def test_legacy_routes_do_not_grant_out_of_band_delivery(tmp_path, monkeypatch):
-    """A migration may preserve authority; it may not mint it.
+def test_routes_never_grant_out_of_band_delivery(tmp_path, monkeypatch):
+    """In-band routing is not egress authority, in either vocabulary.
 
-    Turning a v1 ``routing`` entry into an out-of-band grant would hand an
-    authenticated sender the ability to make the daemon email a human, which its
-    old config did not permit.
+    Waking an adapter over a 0600 unix socket is local; an out-of-band channel
+    sends a real email or POSTs to a resolved URL. Deriving the second from the
+    first would turn every route into egress permission — and on migration would
+    hand a v1 ``routing`` entry authority its old config never gave it.
     """
-    cfg = _loaded(
+    legacy = _loaded(
         tmp_path,
         monkeypatch,
         {
@@ -657,13 +658,10 @@ def test_legacy_routes_do_not_grant_out_of_band_delivery(tmp_path, monkeypatch):
             "routing": {"ops": {"adapter": "claude"}},
         },
     )
-    assert addressing.out_of_band_principals(cfg, "ops") is None
+    assert addressing.out_of_band_principals(legacy, "ops") is None
 
-
-def test_explicit_routes_do_grant_out_of_band_delivery(tmp_path, monkeypatch):
-    """An operator who wrote the route meant it."""
-    cfg = _loaded(
-        tmp_path,
+    v2 = _loaded(
+        tmp_path / "v2",
         monkeypatch,
         {
             "version": 2,
@@ -673,7 +671,28 @@ def test_explicit_routes_do_grant_out_of_band_delivery(tmp_path, monkeypatch):
             "routes": [{"sender": "ops", "destinations": ["dev"]}],
         },
     )
-    assert addressing.out_of_band_principals(cfg, "ops") == {"agent:dev"}
+    assert addressing.out_of_band_principals(v2, "ops") is None
+
+
+def test_out_of_band_delivery_needs_its_own_declaration(tmp_path, monkeypatch):
+    """``allowed_target_principals`` remains the only grant, in both spellings."""
+    cfg = _loaded(
+        tmp_path,
+        monkeypatch,
+        {
+            "version": 2,
+            "senders": {
+                "ops": {
+                    "secret_env": "S",
+                    "allowed_target_principals": ["human:me"],
+                }
+            },
+            "principals": {"human:me": {}, "agent:dev": {}},
+            "destinations": {"dev": {"adapter": "claude", "principal": "agent:dev"}},
+            "routes": [{"sender": "ops", "destinations": ["dev"]}],
+        },
+    )
+    assert addressing.out_of_band_principals(cfg, "ops") == {"human:me"}
 
 
 def test_legacy_hello_sources_are_still_accepted(tmp_path, monkeypatch):
@@ -813,3 +832,213 @@ def test_v2_principal_channels_replace_the_delivery_block(tmp_path, monkeypatch)
     )
     assert v2["delivery"] == v1["delivery"]
     assert addressing.principal_channels(v2, "human:me") == v1["delivery"]["human:me"]
+
+
+# ── operator surfaces: config migrate / show, doctor ──────────────────────────
+
+
+def test_config_migrate_round_trips_the_live_config_shape(tmp_path, monkeypatch, capsys):
+    """The migrated file must address exactly what the original addressed.
+
+    Proven against the shape of the real mvmcc03 file: same credentials, same
+    in-band destinations, and — crucially — the same out-of-band authority.
+    """
+    from agent_waked.cli import main as cli_main
+
+    legacy_raw = {
+        "version": 1,
+        "listen": {"host": "127.0.0.1", "port": 8788},
+        "socket_path": None,
+        "sources": {
+            "mvmcc03-claude": {
+                "secret_env": "AGENT_WAKE_MVMCC03_CLAUDE_SECRET",
+                "callback_url": None,
+                "principal_id": "agent:mvmcc03-claude",
+                "allowed_trigger_identities": ["human:itadmin", "mvmcc03-agent"],
+            },
+            "mvmcc03-opencode": {
+                "secret_env": "AGENT_WAKE_MVMCC03_OPENCODE_SECRET",
+                "callback_url": None,
+                "principal_id": "agent:mvmcc03-opencode",
+                "allowed_trigger_identities": ["human:itadmin", "mvmcc03-agent"],
+            },
+        },
+        "default_callback_url": None,
+        "routing": {
+            "mvmcc03-claude": {"adapter": "claude"},
+            "mvmcc03-opencode": {"adapter": "opencode"},
+        },
+    }
+    legacy_path = tmp_path / "config.json"
+    _write(legacy_path, legacy_raw)
+
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(legacy_path))
+    legacy_cfg = load_config()
+
+    assert cli_main(["config", "migrate", str(legacy_path)]) == 0
+    out = capsys.readouterr()
+    migrated_raw = json.loads(out.out)
+    assert migrated_raw["version"] == 2
+
+    # The conflation is *reported*, not silently rewritten: only the operator
+    # knows which identity they meant.
+    assert "attributed to their own addressee" in out.err
+
+    migrated_path = tmp_path / "v2" / "config.json"
+    _write(migrated_path, migrated_raw)
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(migrated_path))
+    v2_cfg = load_config()
+
+    for name in legacy_cfg["senders"]:
+        assert (
+            v2_cfg["senders"][name]["secret_uris"]
+            == legacy_cfg["senders"][name]["secret_uris"]
+        )
+        assert (
+            v2_cfg["senders"][name]["allowed_trigger_identities"]
+            == legacy_cfg["senders"][name]["allowed_trigger_identities"]
+        )
+        before = [
+            (d.name, d.adapter, d.session, d.principal)
+            for d in addressing.routed_destinations(legacy_cfg, name)
+        ]
+        after = [
+            (d.name, d.adapter, d.session, d.principal)
+            for d in addressing.routed_destinations(v2_cfg, name)
+        ]
+        assert before == after
+        assert addressing.out_of_band_principals(
+            v2_cfg, name
+        ) == addressing.out_of_band_principals(legacy_cfg, name)
+
+
+def test_config_migrate_write_refuses_to_clobber(tmp_path, monkeypatch):
+    from agent_waked.cli import main as cli_main
+
+    src = tmp_path / "config.json"
+    _write(src, {"version": 1, "sources": {"a": {"secret_env": "S"}}, "routing": {}})
+    dest = tmp_path / "out.json"
+    dest.write_text("{}")
+    monkeypatch.delenv("AGENT_WAKE_CONFIG", raising=False)
+    # The error boundary maps ConfigError to the contract envelope, exit 1.
+    assert cli_main(["config", "migrate", str(src), "--write", str(dest)]) == 1
+    assert dest.read_text() == "{}"
+
+
+def test_config_migrate_refuses_an_already_v2_file(tmp_path, monkeypatch):
+    from agent_waked.cli import main as cli_main
+
+    src = tmp_path / "config.json"
+    _write(src, {"version": 2, "senders": {"a": {"secret_env": "S"}}})
+    monkeypatch.delenv("AGENT_WAKE_CONFIG", raising=False)
+    assert cli_main(["config", "migrate", str(src)]) == 1
+
+
+def test_config_show_json_answers_who_can_wake_what(tmp_path, monkeypatch, capsys):
+    from agent_waked.cli import main as cli_main
+
+    _write(
+        tmp_path / "config.json",
+        {
+            "version": 2,
+            "senders": {"ops": {"secret_env": "S"}},
+            "principals": {"agent:dev": {}},
+            "destinations": {
+                "dev-a": {
+                    "adapter": "opencode",
+                    "session": "sess-a",
+                    "principal": "agent:dev",
+                    "max_connections": 1,
+                }
+            },
+            "routes": [{"sender": "ops", "destinations": ["dev-a"]}],
+        },
+    )
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(tmp_path / "config.json"))
+    assert cli_main(["config", "show", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["senders"]["ops"]["reaches"] == ["dev-a"]
+    assert doc["senders"]["ops"]["out_of_band_principals"] == []
+    assert doc["destinations"]["dev-a"]["session"] == "sess-a"
+    assert doc["destinations"]["dev-a"]["max_connections"] == 1
+
+
+def test_doctor_addressing_check_flags_a_config_that_addresses_nobody(
+    tmp_path, monkeypatch
+):
+    """Load-time validation cannot catch a coherent config that wakes nothing."""
+    from agent_waked.doctor import _check_addressing
+
+    _write(
+        tmp_path / "config.json",
+        {
+            "version": 2,
+            "senders": {"ops": {"secret_env": "S"}, "orphan": {"secret_env": "S"}},
+            "principals": {"agent:dev": {}},
+            "destinations": {
+                "dev-a": {"adapter": "opencode", "principal": "agent:dev"},
+                "dev-unused": {"adapter": "opencode", "principal": "agent:dev"},
+            },
+            "routes": [{"sender": "ops", "destinations": ["dev-a"]}],
+        },
+    )
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(tmp_path / "config.json"))
+    status, detail = _check_addressing()
+    assert status == "warn"
+    assert "orphan" in detail
+    assert "dev-unused" in detail
+
+
+def test_doctor_addressing_check_fails_on_an_ambiguous_session(tmp_path, monkeypatch):
+    """Two destinations for one adapter session: a delivery could land wrong."""
+    from agent_waked.doctor import _check_addressing
+
+    _write(
+        tmp_path / "config.json",
+        {
+            "version": 2,
+            "senders": {"ops": {"secret_env": "S"}},
+            "principals": {"agent:dev": {}},
+            "destinations": {
+                "dup-1": {
+                    "adapter": "opencode",
+                    "session": "sess-a",
+                    "principal": "agent:dev",
+                },
+                "dup-2": {
+                    "adapter": "opencode",
+                    "session": "sess-a",
+                    "principal": "agent:dev",
+                },
+            },
+            "routes": [{"sender": "ops", "destinations": ["dup-1", "dup-2"]}],
+        },
+    )
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(tmp_path / "config.json"))
+    status, detail = _check_addressing()
+    assert status == "fail"
+    assert "opencode/sess-a" in detail
+
+
+def test_doctor_addressing_is_ok_on_the_legacy_live_shape(tmp_path, monkeypatch):
+    """The deployed config must not start reporting a new warning."""
+    from agent_waked.doctor import _check_addressing
+
+    _write(
+        tmp_path / "config.json",
+        {
+            "version": 1,
+            "sources": {
+                "mvmcc03-claude": {"secret_env": "S1"},
+                "mvmcc03-opencode": {"secret_env": "S2"},
+            },
+            "routing": {
+                "mvmcc03-claude": {"adapter": "claude"},
+                "mvmcc03-opencode": {"adapter": "opencode"},
+            },
+        },
+    )
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(tmp_path / "config.json"))
+    status, detail = _check_addressing()
+    assert status == "ok", detail
+    assert "2 sender(s) → 2 destination(s)" in detail

@@ -35,7 +35,7 @@ try:
 except Exception:
     _VERSION = "0.1.0"
 
-from . import suite_config
+from . import addressing, suite_config
 from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
 from .secrets.visibility import source_secret_visibility
 
@@ -308,6 +308,80 @@ def _check_allowlist_present() -> tuple[str, str]:
     return "warn", "no sources have principal_id configured (identity layer inactive)"
 
 
+def _check_addressing() -> tuple[str, str]:
+    """Check: every sender reaches something and every destination is reachable.
+
+    Config load already rejects *dangling* references (a route to a destination
+    that does not exist). What it cannot reject is a coherent config that
+    addresses nobody, and both halves of that are silent in production:
+
+    * a sender with no route accepts an authenticated event and returns 202
+      ``no_subscriber`` forever — the sender believes it is delivering;
+    * a destination no route reaches is an adapter that connects, gets an ack for
+      its hello, and is never sent anything.
+
+    Warn rather than fail: a half-built config is a normal state during rollout,
+    and this check must not turn the scheduled box verdict red for a destination
+    an operator is in the middle of wiring (the WI-003 / suite WI-038 lesson —
+    a check that cries wolf is worse than silence).
+
+    A genuine ambiguity does fail: two session-scoped destinations naming the
+    same ``(adapter, session)`` pair, where a delivery to either could land on
+    the wrong one and the operator cannot tell which from the config.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return "skip", "config not loadable (see config_present)"
+
+    senders = addressing.sender_table(cfg)
+    destinations = addressing.destination_table(cfg)
+
+    seen_sessions: dict[tuple[str, str], list[str]] = {}
+    for dest in destinations.values():
+        if dest.session is None or dest.adapter is None:
+            continue
+        seen_sessions.setdefault((dest.adapter, dest.session), []).append(dest.name)
+    collisions = {k: v for k, v in seen_sessions.items() if len(v) > 1}
+    if collisions:
+        detail = "; ".join(
+            f"{adapter}/{session}: {', '.join(sorted(names))}"
+            for (adapter, session), names in sorted(collisions.items())
+        )
+        return "fail", (
+            f"two or more destinations address the same adapter session, so a "
+            f"delivery to either could land on the wrong one: {detail}"
+        )
+
+    unrouted_senders = [
+        name for name in senders if not addressing.routed_destinations(cfg, name)
+    ]
+    reachable = {
+        d.name for name in senders for d in addressing.routed_destinations(cfg, name)
+    }
+    unreachable = sorted(set(destinations) - reachable)
+
+    problems: list[str] = []
+    if unrouted_senders:
+        problems.append(
+            f"sender(s) with no route: {', '.join(sorted(unrouted_senders))} "
+            f"(events are authenticated, accepted and then dropped)"
+        )
+    if unreachable:
+        problems.append(
+            f"destination(s) no route reaches: {', '.join(unreachable)} "
+            f"(an adapter can claim them and will never be sent anything)"
+        )
+    if problems:
+        return "warn", "; ".join(problems)
+
+    session_scoped = sum(1 for d in destinations.values() if d.session_scoped)
+    return "ok", (
+        f"{len(senders)} sender(s) → {len(destinations)} destination(s) "
+        f"({session_scoped} session-scoped), all routed"
+    )
+
+
 def _check_delivery_health() -> tuple[str, str]:
     """Check: human-directed delivery channels are healthy (Plan 005 WI-1.2).
 
@@ -494,6 +568,7 @@ def run_checks() -> dict[str, Any]:
         ("secrets_resolvable", _check_secrets_resolvable),
         ("adapters_installed", _check_adapters_installed),
         ("allowlist_present", _check_allowlist_present),
+        ("addressing", _check_addressing),
         ("delivery_health", _check_delivery_health),
         ("durable_state", _check_durable_state),
     ]:

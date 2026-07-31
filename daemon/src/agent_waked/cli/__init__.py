@@ -75,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .install_harness import _build_install_harness_parser
     _build_install_harness_parser(sub)
 
+    # config — inspect / migrate the addressing model
+    from .config_cmd import _build_config_parsers
+    _build_config_parsers(sub)
+
     # dead-letter / pending — operator visibility over the durable store
     from .queue import _build_queue_parsers
     _build_queue_parsers(sub)
