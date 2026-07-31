@@ -16,6 +16,7 @@ from aiohttp import web
 from ulid import ULID
 
 from .gating import check_trigger_identity, verify_signature, verify_signature_any
+from .secrets import visibility as secret_visibility
 
 if TYPE_CHECKING:
     from .delivery import HumanDelivery
@@ -430,6 +431,15 @@ def create_ingest_app(
 
     async def health_handler(request: web.Request) -> web.Response:
         body: dict[str, Any] = {"status": "ok", "version": version}
+        # The daemon is the authority on whether *its* secrets resolved: it holds
+        # them via its unit's EnvironmentFile and it is the component that signs.
+        # A doctor running in a context without those secrets (the suite's
+        # root-owned scheduled alert-check) asks here instead of failing closed
+        # on material it has no business reading — WI-003.
+        #
+        # Counts and source names only; see secrets.visibility.health_summary for
+        # why this stays safe on an unauthenticated port.
+        body["sources"] = secret_visibility.health_summary(config)
         if socket_server is not None:
             body["adapters"] = len(socket_server.connections)
         if delivery is not None:

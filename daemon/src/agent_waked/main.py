@@ -29,6 +29,7 @@ from .ingest import (
 from .outbox import Outbox
 from .router import Router
 from .secrets.resolver import SecretResolver
+from .secrets.visibility import source_secret_visibility
 from .socket_server import SocketServer
 from .store import StoreError, WakeStore, open_store
 
@@ -161,6 +162,46 @@ def _warn_non_loopback_bind(host: str, cfg: dict[str, Any], explicit: bool = Fal
         )
 
 
+def _require_resolvable_secrets(cfg: dict[str, Any]) -> bool:
+    """True if every env-backed source secret in *cfg* is readable by this process.
+
+    This is the daemon half of the split introduced for WI-003.  ``load_config``
+    validates shape and no longer reads secret material, because "can I read
+    this secret" is a property of the *asking process*, not of the config — a
+    doctor run from the suite's root-owned alert-check cannot read the user's
+    ``secrets.env`` and must not therefore call a healthy estate broken.
+
+    The daemon is the component that signs and verifies wake events, so for the
+    daemon the answer must be fatal: a source whose key it cannot read is a
+    source it would silently fail to authenticate at request time.  Refusing up
+    front turns that into one loud line at start.
+
+    This is strictly *stronger* than the check it replaces.  The old eager
+    resolution in ``load_config`` fired only for the legacy ``secret_env``
+    spelling; a source written as ``"secret": "env://NAME"`` with ``NAME`` unset
+    started the daemon happily and failed per request. All three spellings
+    normalise to ``secret_uris``, which is what this inspects.
+
+    ``vault://`` URIs are not probed — see ``secrets.visibility`` for why
+    startup must not depend on Vault reachability.
+    """
+    vis = source_secret_visibility(cfg)
+    if vis.all_visible:
+        return True
+    log.error(
+        "SECRETS: %d of %d configured source(s) reference secrets that are not "
+        "set in this process's environment: %s (missing env var(s): %s). The "
+        "daemon signs and verifies wake events, so it cannot run for a source "
+        "whose key it cannot read. Check the unit's EnvironmentFile "
+        "(~/.config/agent-wake/secrets.env) and that the daemon runs as its owner.",
+        len(vis.unresolved),
+        vis.configured,
+        ", ".join(vis.unresolved),
+        ", ".join(vis.missing_env_vars),
+    )
+    return False
+
+
 def _reload_config(
     cfg: dict[str, Any],
     router: Router,
@@ -183,6 +224,16 @@ def _reload_config(
 
     if not new_cfg.get("sources"):
         log.error("config reload rejected: no sources in new config")
+        return
+
+    # Same gate as startup: a reload that introduces a source whose secret this
+    # process cannot read would leave the daemon advertising a source it can
+    # never authenticate. Keep the previous config, which we know is signable.
+    if not _require_resolvable_secrets(new_cfg):
+        log.error(
+            "config reload rejected: unreadable source secret(s); keeping the "
+            "previous config"
+        )
         return
 
     old_listen = cfg.get("listen", {})
@@ -261,6 +312,12 @@ async def _run() -> int:
         cfg = load_config()
     except ConfigError as e:
         log.error("config error: %s", e)
+        return 1
+
+    # Refuse to run with a secret we cannot read, before binding anything: the
+    # daemon is the authority on its own secrets precisely because it is the one
+    # that signs with them.
+    if not _require_resolvable_secrets(cfg):
         return 1
 
     try:

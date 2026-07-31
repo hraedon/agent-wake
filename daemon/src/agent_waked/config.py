@@ -5,10 +5,16 @@ Reads ``~/.config/agent-wake/config.json`` (overridable via
 Section 5 of the daemon spec.
 
 Secret forms accepted per-source (mutually exclusive):
-  - ``secret_env``: legacy — env-var name; eagerly resolved here for
-    backwards-compat, converted to ``secret_uris`` = ["env://<name>"].
+  - ``secret_env``: legacy — env-var name; normalised to
+    ``secret_uris`` = ["env://<name>"].
   - ``secret``: single URI string (``env://`` or ``vault://``).
   - ``secrets``: list of URI strings (rotation window).
+
+Loading validates **shape only** and never reads secret material: whether a
+referenced secret is actually readable depends on which process is asking, so it
+is not a property of the config.  ``secrets.visibility`` answers that question
+and ``main._require_resolvable_secrets`` is where it is fatal (the daemon signs,
+so the daemon is the one that must be able to read).
 
 Output shape for each source:
   ``cfg["sources"][name]`` = ``{"secret_uris": [...], "callback_url": ...}``
@@ -101,7 +107,7 @@ def load_config() -> dict[str, Any]:
             "upgrade to version 1 and add a 'routing' block"
         )
 
-    listen = raw.get("listen", {})
+    listen = _validate_listen_block(raw.get("listen"))
     routing = raw.get("routing", {})
     for source_name, route in routing.items():
         if not isinstance(route, dict):
@@ -155,15 +161,24 @@ def load_config() -> dict[str, Any]:
 
         if has_secret_env:
             # Legacy form: convert to URI so the resolver can handle it uniformly.
+            #
+            # The env var is deliberately NOT read here. Loading config validates
+            # *shape*; reading secret material is the resolver's job, and only the
+            # daemon — the component that actually signs — needs it. Resolving
+            # eagerly made ``load_config`` fail closed in every process that
+            # lacked the daemon's environment, which made ``agent-wake doctor``
+            # report a perfectly healthy estate red from the suite's root-owned
+            # scheduled alert-check (WI-003). It was also asymmetric: the
+            # equivalent ``"secret": "env://NAME"`` spelling was never eagerly
+            # resolved, so the strictness depended on which spelling an operator
+            # happened to use.
+            #
+            # The daemon's refusal to run on a secret it cannot read now lives in
+            # ``main._require_resolvable_secrets`` (startup *and* SIGHUP reload),
+            # which covers all three secret forms rather than only this one.
             secret_env = info["secret_env"]
             if not isinstance(secret_env, str) or not secret_env:
                 raise ConfigError(f"Source {name!r}: 'secret_env' must be a non-empty string.")
-            # Eagerly validate env var is set (preserves old behaviour).
-            secret_val = os.environ.get(secret_env)
-            if secret_val is None:
-                raise ConfigError(
-                    f"Source {name!r} references secret_env {secret_env!r} which is not set"
-                )
             secret_uris = [f"env://{secret_env}"]
 
         elif has_secret:
@@ -276,6 +291,36 @@ _STATE_INT_FIELDS = (
     "dead_letter_ttl_seconds",
     "dead_letter_max_rows",
 )
+
+
+def _validate_listen_block(listen: object) -> dict[str, Any]:
+    """Validate the optional ``listen`` block.
+
+    Loud here because the alternative is quiet: an unparseable port used to reach
+    ``resolve_listen`` as a ``ValueError`` (an uncaught traceback in the daemon)
+    and to reach the doctor as an ``OSError`` from ``create_connection``, which
+    the doctor reported as the benign-sounding "daemon not reachable". A port
+    that cannot be a port is a config defect and should be named as one.
+    """
+    if listen is None:
+        return {}
+    if not isinstance(listen, dict):
+        raise ConfigError(
+            f"'listen' must be an object (got {type(listen).__name__})."
+        )
+    host = listen.get("host")
+    if host is not None and (not isinstance(host, str) or not host):
+        raise ConfigError("'listen.host' must be a non-empty string.")
+    port = listen.get("port")
+    if port is not None:
+        if not isinstance(port, int) or isinstance(port, bool):
+            raise ConfigError(
+                f"'listen.port' must be an integer (got {type(port).__name__}: "
+                f"{port!r})."
+            )
+        if not (1 <= port <= 65535):
+            raise ConfigError(f"'listen.port' {port} is out of range (1-65535).")
+    return listen
 
 
 def _validate_state_block(state: object) -> dict[str, Any]:
