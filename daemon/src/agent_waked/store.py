@@ -63,7 +63,10 @@ DEFAULT_PENDING_MAX_ATTEMPTS = 5
 # Amortised pruning: run the retention sweep once every N dedupe inserts.
 _PRUNE_INTERVAL = 256
 
-DEAD_LETTER_KINDS = ("reply", "next_session")
+# Every kind here must be handled by ``cli.queue._cmd_dead_letter_redrive``:
+# a kind that can be written but not redriven is a durable record of an alert
+# an operator cannot act on. ``test_cli_queue`` asserts the two stay in step.
+DEAD_LETTER_KINDS = ("reply", "next_session", "human_delivery")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
