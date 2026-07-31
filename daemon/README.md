@@ -84,6 +84,107 @@ You can still write config.json by hand. Three secret forms are accepted per sou
 
 `routing` is optional. When absent or empty, all sources are delivered to any connected adapter that subscribed to them.
 
+### The addressing model (v2)
+
+A `sources` entry did three jobs at once: it held a credential, it named an
+identity, and it was the routing key. Config version 2 splits them, because
+several things are impossible to say with one fused noun — which *session* of a
+multi-session adapter to wake, how to reach two places from one sender, or what
+to cap per addressee.
+
+| Block | What it is | Scope |
+|---|---|---|
+| `senders` | a credential: HMAC secret(s), the trigger identities allowed to use it, and where its replies go | box config |
+| `principals` | an actor identity (`principal_id`) and its out-of-band channels (webhook / email) | per actor |
+| `destinations` | one addressable place: an adapter, optionally one session of it, belonging to a principal, with its own connection cap | per actor, possibly per session |
+| `routes` | who may reach what, as sender → principal → destination(s) | authorization |
+
+```jsonc
+{
+  "version": 2,
+  "senders": {
+    "ops": {
+      "secret_env": "AGENT_WAKE_OPS_SECRET",
+      // Who *asks* for a wake. Optional; the authenticated
+      // X-AgentWake-Identity header takes precedence when sent.
+      "identity": "human:itadmin",
+      "allowed_trigger_identities": ["human:itadmin", "ci@example.com"],
+      // Out-of-band (meta.target) delivery is default-deny and declared
+      // only here — never derived from routes. See below.
+      "allowed_target_principals": ["human:itadmin"]
+    }
+  },
+  "principals": {
+    "agent:mvmcc03-claude": {},                  // in-band only
+    "human:itadmin": { "channels": { "email": { /* ... */ } } }
+  },
+  "destinations": {
+    "claude-main": {
+      "adapter": "claude",
+      "principal": "agent:mvmcc03-claude"
+    },
+    "oc-review": {
+      "adapter": "opencode",
+      "session": "ses_01H...",                   // this session, not its siblings
+      "principal": "agent:mvmcc03-claude",
+      "max_connections": 2
+    }
+  },
+  "routes": [
+    // Explicit destinations, in delivery order.
+    { "sender": "ops", "destinations": ["claude-main", "oc-review"] }
+    // Or by principal: every destination that principal owns ("wake me
+    // wherever I am").
+    // { "sender": "ops", "principal": "agent:mvmcc03-claude" }
+  ]
+}
+```
+
+**Addressing an event.** A sender reaches exactly the destinations its routes
+name. Two optional `meta` fields *narrow* that set and can never widen it:
+
+| Field | Meaning | Outside the routed set |
+|---|---|---|
+| `meta.destination` | deliver only to this destination | `403 destination_not_routed` |
+| `meta.principal` | deliver only to this principal's routed destinations | `403 principal_not_routed` |
+| `meta.target` | notify this principal **out of band** (email / webhook) | `403` unless in `allowed_target_principals` |
+
+An unrouted-or-idle destination is still a `202` with `no_subscriber`, so a
+sender cannot enumerate what exists on the box; a narrowing *it asked for* being
+refused is its own mistake and is reported.
+
+**Fan-out.** Each destination gets its own frame, its own ack and its own
+durable-queue row. A partial fan-out (one live, one idle) is `queued`: calling
+that a failure would make senders re-send what already landed.
+
+**Out-of-band authorization is separate on purpose.** Waking an adapter happens
+over a `0600` unix socket and stays on the box; an out-of-band channel sends real
+email or POSTs to a URL the daemon resolves. Routes therefore grant in-band
+delivery only, and `allowed_target_principals` remains the single grant for
+`meta.target`.
+
+### Migrating from v0/v1
+
+Nothing has to change. A v0/v1 file loads unchanged and is translated
+internally, with source names becoming both sender and destination names — so
+connected adapters, their `accepted_sources`, and rows already in the durable
+queue all keep addressing the same places.
+
+```bash
+agent-wake config show                  # who can wake what, resolved
+agent-wake config migrate               # print the v2 form of your file
+agent-wake config migrate --write new.json   # refuses to overwrite
+```
+
+`config migrate` also warns when a sender's migrated `identity` equals the
+principal of the destination it routes to. That means the v1 `principal_id` was
+naming *who gets woken*, so events were being attributed to their own addressee
+— a mechanical migration cannot pick the right value, only the operator can.
+
+Mixing the two vocabularies for the same table (`sources` **and** `senders` in
+one file) is a hard error: there is no safe merge, and silently preferring one
+spelling would drop a credential.
+
 ### Vault backend
 
 For sources stored in HashiCorp Vault, add a `vault` block to config.json and install the optional extra:
@@ -293,6 +394,7 @@ Checks performed:
 | `secrets_resolvable` | every source's signing secret is readable by whoever needs it |
 | `adapters_installed` | at least one adapter binary on PATH |
 | `allowlist_present` | sources with principal_id have identity allowlists |
+| `addressing` | every sender reaches something, every destination is reachable, no two destinations claim one adapter session |
 | `delivery_health` | human-directed delivery channels are healthy |
 | `durable_state` | the durable store opens; dead-letter backlog surfaced |
 
@@ -303,9 +405,9 @@ When suite.env is present, the doctor also reports regista connectivity.
 The doctor is frequently run from a context that cannot read per-source signing
 secrets — most importantly the suite's scheduled `agent-suite-doctor-alert.service`,
 which runs as `root` with only `/etc/agent-suite/suite.env` loaded. Per
-[`docs/secrets-instantiation.md`](../docs/secrets-instantiation.md) per-host
-signing material must never be copied into that shared file, and a `%h` path
-would not reach the user's `secrets.env` from a root unit anyway.
+agent-suite `docs/secrets-vault.md`, per-host signing material must never be
+copied into that shared file, and a `%h` path would not reach the user's
+`secrets.env` from a root unit anyway.
 
 That is fine, because the doctor is not the component that signs. The daemon is,
 it holds the secrets via its unit's
@@ -419,5 +521,6 @@ See [`design/v1-daemon-spec.md`](../design/v1-daemon-spec.md) §2 for the full a
 - **Live sessions only.** Wake events are delivered to currently-connected adapters. If no adapter is subscribed for a source, the event returns `202 no_subscriber` and is not queued. There is no durable inbox — missed events are lost. A per-session inbox (Signal-With-Start semantics) is a v1.5+ consideration tied to regista's durable storage.
 - **In-memory dedupe.** The 4096-event dedupe window is lost on daemon restart. A retry-after-restart may produce a duplicate wake. Durable dedupe is deferred to v1 with regista's involvement.
 - **No retries on reply delivery.** The outbox POSTs once with a 30-second timeout. Permanent failures are logged at warning level. Durable reply retry is a v1.1+ concern.
-- **Single Unix user per daemon.** The unix socket is protected by filesystem mode (`0600`). Any local process running as the daemon's user can subscribe as any adapter family. Per-user isolation is a v2 concern (see `design/identity-and-multi-user.md`).
-- **Identity allowlists are unauthenticated.** The `X-AgentWake-Identity` header is trusted after HMAC verification of the source. The identity is the source's declared `principal_id`, not a cryptographic proof from the sender. Full cryptographic identity (Ed25519 signatures per sender) requires regista BC-196 and is a v2 feature.
+- **Single Unix user per daemon.** The unix socket is protected by filesystem mode (`0600`). Any local process running as the daemon's user can connect. It can no longer claim *any* destination, though: a `hello` is granted only destinations whose configured `adapter` matches the one it declares, and a `reply` naming a destination the connection does not serve is refused. Per-user isolation is still a v2 concern (see `design/identity-and-multi-user.md`).
+- **Identity allowlists are unauthenticated.** The `X-AgentWake-Identity` header is trusted after HMAC verification of the sender's secret: possession of the shared key is what is proven, and the identity string inside it is asserted, not cryptographically bound to the sender. It is checked against the sender's `allowed_trigger_identities`, so an authenticated sender can claim any identity on its own allowlist but none outside it. Full cryptographic identity (Ed25519 signatures per sender) requires regista BC-196 and is a v2 feature.
+- **Outbound requests are not authenticated.** Replies and permission relays POST to callback URLs with no signature (BC-WAKE-008 / BC-WAKE-018). The addressing model now names the peer for them — a reply carries its `destination`, and the daemon resolves that to a principal — so signing is additive work rather than a redesign, but it has not landed yet.

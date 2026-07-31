@@ -76,6 +76,60 @@ for the scope statement.
   dedupe, the next-session queue and the dead-letter table. See
   README §Delivery semantics and `daemon/src/agent_waked/store.py`.
   Regista remains the *ingest* path, not the delivery-state store.
+- ~~**Should delivery record an attributable event in regista?**~~
+  **DECIDED 2026-07-31 (WI-006). No — not on the delivery path, and not
+  as a store dependency at all for now.** The question is real: a wake
+  event that causes an agent to act is provenance-relevant, and this
+  file already says wake events are audit-worthy. But nothing in the
+  estate supports a synchronous regista write here:
+  - **There is no async ingest.** Every regista write is a synchronous,
+    signed Postgres transaction — `_events_api.append_event`. No queue,
+    no batch endpoint, no buffered path. The HTTP sidecar exists but has
+    zero consumers, no client library, and its own plan calls v1
+    "provisional and will be reshaped when consumer #2 lands."
+  - **Two independently-filed high-severity bugs this month were exactly
+    this mistake**, and both were fixed by *removing* store work from a
+    polled path: agent-provenance WI-030 (`cairn doctor` replayed the
+    production chain; 3m55s → 0.5s once split out) and dossier WI-034
+    (`/healthz` called `gateway.integrity()` per project per request:
+    102 MiB → 2.09 GiB after one probe, never released — the suite's own
+    doctor was killing the service it checked). agent-wake's own
+    `doctor._check_regista` already follows that rule.
+  - **`append_event` needs a parent entity** (`WORK_ITEM_NOT_FOUND`
+    otherwise), so a wake delivery cannot be a free-standing event; it
+    would need a `session`-kind entity and a lifecycle to manage.
+  - **An unattributable event is worse than none.** A signing key not
+    registered for the project it signs for produces chains
+    `regista bundle verify` rejects. And the estate has *three* live
+    `principal_id` conventions (`human:x` prefixed, bare
+    `alice@example.com`, and a separate `PrincipalKind` enum), with
+    regista's only format validator — `_provision._validate_principal_id`
+    — rejecting both of the string forms agent-wake and cairn actually
+    use. agent-wake must not invent a fourth; the config layer therefore
+    treats `principal_id` as **opaque** and validates only non-emptiness.
+  - **It would make `test_suite_lock_declares_no_spine` a lie** and add a
+    cross-repo version-pin obligation for a Tier 2 component taking a
+    synchronous dependency on Tier 0 — which inverts
+    "absent Tier 2 is ABSENT, not FAILED".
+
+  This is the *same* answer the 2026-07-24 durable-inbox decision gave,
+  for the same reason, so it is consistent rather than a second
+  exception: **regista is the ingest path, not the delivery-state store,
+  and now not the attestation path either.**
+
+  What WI-006 did instead is make attestation *possible later without
+  redoing it*: delivery now knows all three identities separately —
+  `meta.trigger_identity` (who asked), `destination.principal` (whose
+  attention was requested), `meta.actor_identity` (who is operating the
+  harness) — which is exactly the tuple an attestation needs and which
+  the fused `sources` entry could not produce. If the requirement
+  becomes real, the shape is agent-notes'
+  `core/outbox.py`: write to the SQLite store already on the path (a
+  lock-guarded indexed insert, tens of microseconds) and drain to regista
+  from a separate command, optional, absent-is-not-failure, with a
+  `provenance_pending` counter in `doctor --json`. Filed rather than
+  built, because the `principal_id` vocabulary is an unresolved
+  prerequisite either way.
 - Authentication / sender gating: required for any HTTP ingest. Same
   rationale as the channels docs — "an ungated channel is a prompt
   injection vector."

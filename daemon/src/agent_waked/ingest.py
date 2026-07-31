@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 from ulid import ULID
 
+from . import addressing
 from .gating import check_trigger_identity, verify_signature, verify_signature_any
+from .router import REFUSAL_STATUSES
 from .secrets import visibility as secret_visibility
 
 if TYPE_CHECKING:
@@ -345,10 +347,27 @@ def create_ingest_app(
 
         event_id = event["event_id"]
 
-        # Stamp trigger_identity in meta if the source has a principal_id.
-        principal_id = source_cfg.get("principal_id")
-        if principal_id:
-            event.setdefault("meta", {})["trigger_identity"] = principal_id
+        # Identity stamping (WI-006). Three fields, three distinct questions,
+        # where v1 had one field answering the wrong one:
+        #
+        #   meta.trigger_identity  who asked for this wake
+        #   meta.principal         whose attention was requested (below)
+        #   meta.actor_identity    who is operating the harness — adapter-set,
+        #                          per core/schema.md; the daemon cannot know it
+        #
+        # v1 stamped trigger_identity from the source's static ``principal_id``.
+        # On the live mvmcc03 config that field holds ``agent:mvmcc03-claude``,
+        # the identity of the agent being *woken*, while the identities that
+        # actually trigger it are the ``human:itadmin`` / ``mvmcc03-agent`` in
+        # its allowlist — so every event was attributed to its own addressee.
+        # The authenticated header wins now: it is the identity the allowlist
+        # just checked, i.e. the one the daemon actually authorised. Senders that
+        # assert nothing keep the declared value they had.
+        trigger_identity = addressing.trigger_identity_for(
+            config, source, sender_identity
+        )
+        if trigger_identity:
+            event.setdefault("meta", {})["trigger_identity"] = trigger_identity
 
         if dedupe.check(event_id, source):
             return _json_response(202, {"status": "duplicate", "event_id": event_id})
@@ -375,15 +394,17 @@ def create_ingest_app(
                             "event_id": event_id,
                         },
                     )
-                # Delivery authorization (Plan 005): a source may only deliver
-                # to principals it explicitly declares in allowed_target_principals.
-                # Default-deny — an authenticated source cannot steer deliveries
-                # to arbitrary principals.
-                allowed_targets = source_cfg.get("allowed_target_principals")
-                if (
-                    not isinstance(allowed_targets, list)
-                    or principal_id not in allowed_targets
-                ):
+                # Delivery authorization (Plan 005, restructured by WI-006): a
+                # sender may only deliver out-of-band to principals it is
+                # authorised for — either declared in
+                # ``allowed_target_principals`` or reachable via a route the
+                # operator wrote. Default-deny: no declaration at all means no
+                # out-of-band delivery, and routes *synthesised* from a legacy
+                # ``routing`` block do not count, because a migration must not
+                # grant a sender the ability to email a human that its old
+                # config never gave it.
+                allowed_targets = addressing.out_of_band_principals(config, source)
+                if allowed_targets is None or principal_id not in allowed_targets:
                     log.warning(
                         "delivery denied source=%s target=%s event_id=%s "
                         "(not in allowed_target_principals)",
@@ -409,6 +430,27 @@ def create_ingest_app(
                 }
 
         result = await router.deliver(event)
+        if result in REFUSAL_STATUSES:
+            # The event narrowed itself (meta.destination / meta.principal) to
+            # somewhere this sender has no route to. An authorization answer, and
+            # deliberately distinct from ``no_subscriber``: an unrouted name and
+            # an idle one look identical to the sender precisely so it cannot
+            # enumerate destinations, but a *narrowing it asked for* being
+            # refused is its own mistake and it should be told.
+            log.warning(
+                "addressing refused source=%s event_id=%s reason=%s",
+                source,
+                event_id,
+                result,
+            )
+            refusal: dict[str, Any] = {
+                "error": "sender not authorized for the addressed destination",
+                "reason": result,
+                "event_id": event_id,
+            }
+            if delivery_result is not None:
+                refusal["delivery"] = delivery_result
+            return _json_response(403, refusal)
         if result in ("no_subscriber", "queued_next_session"):
             # ``queued_next_session``: no live session accepted the event, but
             # durable delivery was requested, so the daemon has persisted it and

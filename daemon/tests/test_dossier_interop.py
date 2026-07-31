@@ -94,8 +94,20 @@ async def test_authenticated_dossier_event_routes_to_named_human() -> None:
     finally:
         await client.close()
 
-    assert delivery.events == [event]
-    assert router.events == [event]
+    # The daemon stamps the *authenticated* sender identity as
+    # meta.trigger_identity (WI-006). Before the addressing split it stamped the
+    # source's static ``principal_id`` instead, which for a sender like dossier
+    # meant either nothing at all or — as on the live mvmcc03 config — the
+    # identity of the agent being woken. dossier asserted ``service:dossier``,
+    # the allowlist admitted it, so that is what the event is attributed to.
+    assert len(delivery.events) == 1
+    delivered = delivery.events[0]
+    assert delivered["meta"]["trigger_identity"] == "service:dossier"
+    assert router.events == [delivered]
+
+    expected = dict(event)
+    expected["meta"] = {**event["meta"], "trigger_identity": "service:dossier"}
+    assert delivered == expected
 
 
 @pytest.mark.asyncio
