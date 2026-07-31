@@ -31,8 +31,15 @@ def test_legacy_secret_env_loads(tmp_path, monkeypatch):
     assert cfg["sources"]["demo"]["secret_uris"] == ["env://MY_SECRET"]
 
 
-def test_legacy_secret_env_missing_var_raises(tmp_path, monkeypatch):
-    """secret_env pointing to unset var raises ConfigError."""
+def test_legacy_secret_env_missing_var_loads_shape(tmp_path, monkeypatch):
+    """An unset secret_env var is not a config-shape error (WI-003).
+
+    ``load_config`` validates shape and does not read secret material: whether a
+    referenced secret is readable depends on which process is asking, so it is
+    not a property of the config. The daemon's refusal lives in
+    ``main._require_resolvable_secrets`` (see test_secret_visibility.py) and the
+    doctor's honest report in ``doctor._check_secrets_resolvable``.
+    """
     monkeypatch.delenv("MY_MISSING_SECRET", raising=False)
     cfg_path = tmp_path / "config.json"
     _write_config(cfg_path, {
@@ -40,8 +47,8 @@ def test_legacy_secret_env_missing_var_raises(tmp_path, monkeypatch):
         "sources": {"demo": {"secret_env": "MY_MISSING_SECRET"}}
     })
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
-    with pytest.raises(ConfigError, match="MY_MISSING_SECRET"):
-        load_config()
+    cfg = load_config()
+    assert cfg["sources"]["demo"]["secret_uris"] == ["env://MY_MISSING_SECRET"]
 
 
 def test_legacy_two_sources(tmp_path, monkeypatch):

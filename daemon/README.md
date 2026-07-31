@@ -287,13 +287,52 @@ Checks performed:
 
 | Check | Description |
 |---|---|
-| `config_present` | config.json exists and loads cleanly |
+| `config_present` | config.json exists and its shape is valid |
 | `ingress_reachable` | daemon HTTP port responds |
 | `auth_configured` | at least one source has a secret (not open) |
+| `secrets_resolvable` | every source's signing secret is readable by whoever needs it |
 | `adapters_installed` | at least one adapter binary on PATH |
 | `allowlist_present` | sources with principal_id have identity allowlists |
+| `delivery_health` | human-directed delivery channels are healthy |
+| `durable_state` | the durable store opens; dead-letter backlog surfaced |
 
 When suite.env is present, the doctor also reports regista connectivity.
+
+#### Running the doctor without the daemon's secrets
+
+The doctor is frequently run from a context that cannot read per-source signing
+secrets — most importantly the suite's scheduled `agent-suite-doctor-alert.service`,
+which runs as `root` with only `/etc/agent-suite/suite.env` loaded. Per
+[`docs/secrets-instantiation.md`](../docs/secrets-instantiation.md) per-host
+signing material must never be copied into that shared file, and a `%h` path
+would not reach the user's `secrets.env` from a root unit anyway.
+
+That is fine, because the doctor is not the component that signs. The daemon is,
+it holds the secrets via its unit's
+`EnvironmentFile=%h/.config/agent-wake/secrets.env`, and it reports its own
+answer on `GET /`:
+
+```json
+"sources": { "configured": 2, "secrets_unresolved": 0, "unresolved": [] }
+```
+
+So `secrets_resolvable` resolves as follows:
+
+| This process can read the secrets | Daemon's answer | Verdict |
+|---|---|---|
+| yes | not complaining | `ok` |
+| yes or no | reports unresolved sources | `fail` — the signer cannot sign |
+| no | all resolved | `skip`, naming the limitation |
+| no | unreachable, or too old to answer | `fail` — unknown is not green |
+
+`GET /` carries counts and source names only; it never carries secret values, and
+deliberately not env-var names either, since it is reachable without auth.
+
+Config loading validates *shape* and never reads secret material, because
+"can I read this secret" is a property of the asking process rather than of the
+config. The daemon's refusal to run on an unreadable secret lives in
+`main._require_resolvable_secrets`, which gates both startup and SIGHUP reload
+and covers all three secret spellings (`secret_env`, `secret`, `secrets`).
 
 ### Dossier human notifications
 

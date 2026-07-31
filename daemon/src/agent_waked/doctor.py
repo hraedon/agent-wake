@@ -37,12 +37,63 @@ except Exception:
 
 from . import suite_config
 from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
+from .secrets.visibility import source_secret_visibility
+
+# ── daemon probe ──────────────────────────────────────────────────────────────
+
+
+def _daemon_address(cfg: dict[str, Any]) -> tuple[str, int]:
+    """The address the daemon actually binds, honouring the env overrides."""
+    from .main import resolve_listen
+    try:
+        return resolve_listen(cfg)
+    except Exception:
+        listen = cfg.get("listen", {}) or {}
+        return listen.get("host", "127.0.0.1"), listen.get("port", 8788)
+
+
+def _fetch_daemon_health(cfg: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """GET the daemon's health document.
+
+    Returns ``(body, "")`` on success or ``(None, reason)`` on any failure. The
+    reason is carried rather than swallowed because "the daemon could not be
+    reached" is load-bearing for ``secrets_resolvable``: it is the difference
+    between deferring to the authority and having no authority to defer to.
+    """
+    host, port = _daemon_address(cfg)
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            pass
+    except (TimeoutError, ConnectionRefusedError, OSError) as e:
+        return None, f"not reachable at {host}:{port}: {e}"
+    try:
+        req = urllib.request.Request(f"http://{host}:{port}/", method="GET")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if not (200 <= resp.status < 300):
+                return None, f"health endpoint returned HTTP {resp.status}"
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        return None, f"health probe failed: {e}"
+    if not isinstance(body, dict):
+        return None, "health endpoint returned a non-object body"
+    return body, ""
+
 
 # ── check helpers ─────────────────────────────────────────────────────────────
 
 
 def _check_config_file() -> tuple[str, str]:
-    """Check: config.json exists and loads cleanly."""
+    """Check: config.json exists and its *shape* is valid.
+
+    Still fails loudly for everything that is genuinely the config's fault —
+    malformed JSON, a source declaring none of ``secret_env``/``secret``/
+    ``secrets``, an unsupported secret URI scheme, a bare-string
+    ``allowed_trigger_identities``, an unparseable listen block, a ``vault://``
+    URI with no ``vault`` block.  What it no longer conflates into "broken
+    config" is whether the referenced secrets happen to be readable *by this
+    process*; that is ``secrets_resolvable``'s question, and the answer depends
+    on who is asking.
+    """
     config_path_env = os.environ.get("AGENT_WAKE_CONFIG")
     config_path = Path(config_path_env) if config_path_env else DEFAULT_CONFIG_PATH
     if not config_path.exists():
@@ -67,12 +118,7 @@ def _check_ingress_reachable() -> tuple[str, str]:
     # Honor AGENT_WAKE_LISTEN_HOST / AGENT_WAKE_LISTEN_PORT so doctor probes
     # the same address the daemon actually binds (the daemon reads these env
     # overrides in main.resolve_listen).
-    from .main import resolve_listen
-    try:
-        host, port = resolve_listen(cfg)
-    except Exception:
-        host = cfg.get("listen", {}).get("host", "127.0.0.1")
-        port = cfg.get("listen", {}).get("port", 8788)
+    host, port = _daemon_address(cfg)
 
     try:
         with socket.create_connection((host, port), timeout=2.0):
@@ -116,6 +162,86 @@ def _check_auth_configured() -> tuple[str, str]:
         return "fail", f"sources without secrets: {', '.join(no_secret)}"
 
     return "ok", f"{len(sources)} source(s) with secrets configured"
+
+
+def _check_secrets_resolvable() -> tuple[str, str]:
+    """Check: every source's signing secret is readable *by whoever needs it*.
+
+    The distinction in that sentence is the whole check (WI-003).  The doctor is
+    not the component that signs; the daemon is.  The doctor is routinely run
+    from a context that cannot see per-source secrets — the suite's scheduled
+    ``agent-suite-doctor-alert.service`` runs as ``root`` with only
+    ``/etc/agent-suite/suite.env`` loaded, and per
+    ``docs/secrets-instantiation.md`` per-host signing material must never be
+    copied into that shared file.  Treating "I cannot see the secret" as "the
+    component is broken" made that hourly check report a healthy estate red
+    every single run, which trains operators to ignore the channel — strictly
+    worse than silence, and it would have made the Lane F red-alert-delivery
+    exercise meaningless because agent-wake could never be anything but red.
+
+    So the verdict is sourced from the authority:
+
+    - daemon says it has sources whose secrets it cannot resolve → **fail**,
+      regardless of what this process can see. The daemon signs; it knows.
+    - secrets readable here and the daemon is not complaining → **ok**.
+    - secrets not readable here, daemon confirms its own resolved → **skip**,
+      naming the limitation. Not ``warn``: a warn sets ``degraded`` and would
+      re-create the same hourly cry-wolf one severity lower, and there is
+      genuinely nothing wrong — this process simply is not the one that needs
+      the key.
+    - secrets not readable here **and** no usable answer from the daemon →
+      **fail**. Health cannot be confirmed from either source, and "unknown" is
+      not "green".
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return "skip", "config not loadable (see config_present)"
+
+    vis = source_secret_visibility(cfg)
+    body, probe_error = _fetch_daemon_health(cfg)
+    daemon_sources = body.get("sources") if body is not None else None
+    if isinstance(daemon_sources, dict):
+        daemon_unresolved = [str(s) for s in (daemon_sources.get("unresolved") or [])]
+        daemon_configured = daemon_sources.get("configured")
+    else:
+        daemon_unresolved = []
+        daemon_configured = None
+
+    if daemon_unresolved:
+        return "fail", (
+            f"the daemon cannot resolve the secret(s) for {len(daemon_unresolved)} "
+            f"source(s): {', '.join(daemon_unresolved)} — it signs wake events "
+            f"with them, so those sources cannot be authenticated; check the "
+            f"unit's EnvironmentFile"
+        )
+
+    if vis.all_visible:
+        return "ok", (
+            f"all {vis.configured} source secret(s) readable in this process"
+        )
+
+    missing = ", ".join(vis.missing_env_vars)
+    if daemon_configured is None:
+        if body is None:
+            return "fail", (
+                f"secrets not visible from this context (unset: {missing}) and "
+                f"the daemon could not be asked ({probe_error}) — health cannot "
+                f"be confirmed from either source"
+            )
+        return "fail", (
+            f"secrets not visible from this context (unset: {missing}) and the "
+            f"running daemon's health document does not report source secret "
+            f"state, so health cannot be confirmed — restart agent-waked to pick "
+            f"up a build that reports it"
+        )
+
+    return "skip", (
+        f"secrets not visible from this context (unset: {missing}); the daemon "
+        f"reports {daemon_configured} source(s) configured with all secrets "
+        f"resolved. It holds them via its unit's EnvironmentFile and is the "
+        f"authority — this probe does not need them"
+    )
 
 
 def _check_adapters_installed() -> tuple[str, str]:
@@ -204,14 +330,7 @@ def _check_delivery_health() -> tuple[str, str]:
         return "warn", f"principals without delivery channels: {', '.join(empty)}"
 
     # Probe the daemon's health endpoint for live delivery status.
-    listen = cfg.get("listen", {})
-    host = listen.get("host", "127.0.0.1")
-    port = listen.get("port", 8788)
-    try:
-        from .main import resolve_listen
-        host, port = resolve_listen(cfg)
-    except Exception:
-        pass
+    host, port = _daemon_address(cfg)
 
     try:
         url = f"http://{host}:{port}/"
@@ -372,6 +491,7 @@ def run_checks() -> dict[str, Any]:
         ("config_present", _check_config_file),
         ("ingress_reachable", _check_ingress_reachable),
         ("auth_configured", _check_auth_configured),
+        ("secrets_resolvable", _check_secrets_resolvable),
         ("adapters_installed", _check_adapters_installed),
         ("allowlist_present", _check_allowlist_present),
         ("delivery_health", _check_delivery_health),
