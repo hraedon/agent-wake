@@ -135,6 +135,7 @@ All frames carry `"type"`. Other fields per type:
   "v": 1,
   "adapter": "claude",
   "instance": "pid-12345",
+  "destinations": ["claude-main"],
   "filters": {"sources": ["github-actions", "telegram-bot"]}
 }
 ```
@@ -142,7 +143,9 @@ All frames carry `"type"`. Other fields per type:
 - `v` — protocol version. v1 only accepts `1`. Reject any other with `error` frame `version_unsupported` and close.
 - `adapter` — adapter family name. v1 known values: `"claude"`. Unknown values are accepted (forward compat).
 - `instance` — opaque, adapter-supplied. Used by daemon for logging and to disambiguate multiple connections from the same family.
-- `filters.sources` — list of source names this adapter is willing to receive. If a routed event's source is not in this list, the daemon drops the event with `no_subscriber` (see 5.4).
+- `destinations` — **added by config v2.** Destination names this connection serves. A claim is honoured only if the destination exists and its configured `adapter` matches this connection's — a socket peer asking for somebody else's destination is not authorization. A connection that serves a session-scoped destination is how the daemon knows which session to wake (BC-001).
+- `filters.sources` — list of source names this adapter is willing to receive. Still accepted on its own, which is what keeps already-deployed adapters working: the daemon resolves those names to destinations (under the v0/v1 translation they *are* destination names). If a routed event's destination is not served by any connection, the daemon reports `no_subscriber` (see 5.4).
+- At least one of `destinations` / `filters.sources` must be present. A hello claiming nothing would hold a connection slot and never be routed anything, which reads as a hung adapter rather than the misconfiguration it is.
 
 #### 4.3.2 `hello_ack` (daemon → adapter, response to hello)
 
@@ -151,12 +154,16 @@ All frames carry `"type"`. Other fields per type:
   "type": "hello_ack",
   "v": 1,
   "session_id": "01J...",
-  "accepted_sources": ["github-actions", "telegram-bot"]
+  "accepted_sources": ["github-actions", "telegram-bot"],
+  "accepted_destinations": ["claude-main"]
 }
 ```
 
 - `session_id` — ULID minted by the daemon. Echoed in subsequent log lines on both sides.
-- `accepted_sources` — intersection of the adapter's `filters.sources` and sources configured in daemon config that target this adapter. Surfaces config drift early.
+- `accepted_sources` — intersection of the adapter's `filters.sources` and sources configured in daemon config that target this adapter. Surfaces config drift early. Unchanged from v1, deliberately: it is what deployed adapters read.
+- `accepted_destinations` — **added by config v2.** The destination names this connection will actually be sent events for. An empty list against a non-empty claim is the loud signal that a destination was misspelled or belongs to another adapter.
+
+If admitting this connection would exceed a destination's `max_connections`, the daemon sends `error` with code `connection_limit` naming the destination and closes, rather than admitting a connection that cannot be honoured (BC-WAKE-010).
 
 After receiving `hello_ack` the adapter is "subscribed" and may receive `wake` frames.
 
@@ -166,6 +173,12 @@ After receiving `hello_ack` the adapter is "subscribed" and may receive `wake` f
 {
   "type": "wake",
   "ack_id": "01J...",
+  "destination": {
+    "name": "oc-review",
+    "adapter": "opencode",
+    "session": "ses_01H...",
+    "principal": "agent:mvmcc03-claude"
+  },
   "event": {
     "v": 0,
     "event_id": "...",
@@ -178,8 +191,13 @@ After receiving `hello_ack` the adapter is "subscribed" and may receive `wake` f
 }
 ```
 
-- `event` — verbatim v0 wake event (Section 3 of `core/schema.md`). The daemon does not mutate `event` between ingest and delivery.
+- `event` — verbatim v0 wake event (Section 3 of `core/schema.md`), apart from the identity keys the daemon stamps at ingest. The daemon does not otherwise mutate `event` between ingest and delivery.
 - `ack_id` — daemon-minted, distinct from `event.event_id`. The adapter MUST send `ack` with this id within 5 seconds.
+- `destination` — **added by config v2.** Who this copy of the event is addressed to. `name` is always present; `adapter`, `session` and `principal` appear when configured. `session` is what closes BC-001: a multi-session adapter is told which session to wake instead of broadcasting for lack of an addressee. `principal` is the daemon-authoritative answer to "whose attention was requested", which cannot live on `event.meta` because a fan-out gives one event a different addressee per recipient.
+
+An adapter that ignores `destination` behaves exactly as it did under v1, which is why the field is optional and why the deployed Claude adapter needed no change.
+
+One event addressed to several destinations produces one `wake` frame per destination, each with its own `ack_id`, delivered in config order (BC-WAKE-022).
 
 #### 4.3.4 `ack` (adapter → daemon)
 
@@ -203,12 +221,15 @@ Sent when the adapter cannot deliver to the harness (e.g., MCP stdout closed). L
 {
   "type": "reply",
   "source": "github-actions",
+  "destination": "oc-review",
   "in_reply_to": "01J...",
   "content": "string"
 }
 ```
 
-The agent invoked the `agent_wake_reply` tool. The adapter forwards the args here. The daemon looks up the source's `callback_url` and POSTs (see Section 8).
+The agent invoked the `agent_wake_reply` tool. The adapter forwards the args here. The daemon looks up the sender's `callback_url` and POSTs (see Section 8).
+
+- `destination` — **added by config v2**, optional. Which addressee is replying. When present it MUST be a destination this connection serves, or the daemon answers with a non-fatal `error` frame (`unauthorized_destination`) and drops the reply: without that check an adapter could attribute its reply to another principal. The daemon carries the destination and its principal into the outbound payload's `meta`, which is the "who is the peer on the way out" the outbound-auth items (BC-WAKE-008/017/018) were blocked on. It does **not** yet authenticate the outbound request — that is deliberately the next piece of work, sequenced after addressing so it is not built against a model that cannot name its peer.
 
 #### 4.3.7 `reply_result` (daemon → adapter)
 
@@ -305,17 +326,34 @@ Backward compatible: v0 config files load unchanged if `routing` is absent (Sect
 - `version` — `1` for the daemon. `0` is also accepted (v0 compat); the daemon logs a one-line deprecation note and treats the file as if `version` were 1 with an empty `routing` block.
 - `listen.host` / `listen.port` — HTTP ingest bind. Default `127.0.0.1:8788`.
 - `socket_path` — explicit override for the unix-socket path. `null` means use the discovery rule in Section 4.1.
-- `sources` — unchanged from v0.
-- `routing` — map from source name to adapter target. v1 supports only `{"adapter": "<name>"}`. An empty or missing `routing` block means "route all sources to any connected adapter that subscribed to them" (legacy single-adapter mode). When multiple adapters claim the same source under legacy mode, the daemon picks the most recently subscribed one and logs a warning.
+- `sources` — unchanged from v0. Superseded by `senders` in config v2 (Section 5.5); still accepted indefinitely.
+- `routing` — map from source name to adapter target. v1 supports only `{"adapter": "<name>"}`. An empty or missing `routing` block means "route all sources to any connected adapter that subscribed to them" (legacy single-adapter mode). When multiple adapters claim the same source under legacy mode, the daemon picks the most recently subscribed one and logs a warning. Superseded by `destinations` + `routes` in config v2.
 
 ### 5.4 Routing resolution
 
-For an inbound event with `source = S`:
+For an inbound event from sender `S`:
 
-1. If `routing[S].adapter` is set, find the subscribed adapter whose `hello.adapter == routing[S].adapter` AND `S` is in its `hello.filters.sources`. Deliver. If none, log `no_subscriber` and return HTTP 202 with `{"status":"no_subscriber"}`.
-2. Else (legacy mode), find any subscribed adapter with `S` in its `filters.sources`. If multiple, pick most recent. If none, same as above.
+1. Resolve `S`'s routes to a destination set (Section 5.5). Under the v0/v1 translation this is the single destination named after the source, so the result is identical to what v1 computed.
+2. If the event carries `meta.destination` or `meta.principal`, intersect. An empty intersection is HTTP 403 with `reason: destination_not_routed` / `principal_not_routed` — the sender narrowed to somewhere it has no route to, which is its own error and is reported.
+3. For each destination, find the connection serving it whose `hello.adapter` matches the destination's configured `adapter` (any adapter, if unconfigured). If several, pick the most recently subscribed — the v1 rule-2 tiebreak, now rare because session scoping means sibling sessions claim different destinations.
+4. Send one `wake` frame per destination found. Destinations with no live connection are either queued for that destination (when the event asked for durable delivery) or dropped.
 
-`no_subscriber` is a successful HTTP 202 in both cases — at-least-once delivery from the sender's perspective is preserved; the daemon dropped the event because no one was listening. Document this in the daemon README.
+The response is HTTP 202 with `queued` if **any** destination was delivered — a partial fan-out is not a failure, and reporting one would make senders re-send what already landed. `queued_next_session` when nothing was live but something was persisted; `no_subscriber` otherwise.
+
+`no_subscriber` is a successful HTTP 202 — at-least-once delivery from the sender's perspective is preserved; the daemon dropped the event because no one was listening. It is also deliberately indistinguishable from "that destination is not routed to you", so a sender cannot enumerate the box's destinations.
+
+### 5.5 Config v2: the addressing model
+
+Config version 2 (WI-006) replaces the fused `sources` entry with the three concepts it was carrying, plus an explicit authorization edge:
+
+- `senders` — credential only: `secret_env` / `secret` / `secrets`, `allowed_trigger_identities`, `callback_url`, `allowed_target_principals`, and an optional `identity` (who *asks*, stamped as `meta.trigger_identity`).
+- `principals` — `principal_id` → `{"channels": {...}}`; the out-of-band delivery table v1 kept at the top level as `delivery`.
+- `destinations` — name → `{"adapter", "session", "principal", "max_connections"}`. One addressable place. `session` requires `adapter`, since a session identifier only means something within one adapter.
+- `routes` — a **list** of `{"sender", "principal"?, "destinations"?}`. A list rather than a map because a name-keyed table can hold exactly one target per key, which is why fan-out needed a schema change to exist at all. `principal` alone means "every destination that principal owns".
+
+Every reference is validated at load: a route to a destination that does not exist would accept events and wake nobody. Mixing vocabularies for one table (`sources` and `senders` together) is a hard error — there is no safe merge, and silently preferring one spelling drops a credential.
+
+`agent-wake config show` prints the resolved model; `agent-wake config migrate` prints the v2 form of a v0/v1 file. The translation is identity-preserving (a source name becomes both a sender and a destination name) and authority-preserving: out-of-band delivery is granted only by `allowed_target_principals` and never derived from routes, so migrating cannot mint egress authority the old file lacked.
 
 ---
 

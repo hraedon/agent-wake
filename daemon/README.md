@@ -394,6 +394,7 @@ Checks performed:
 | `secrets_resolvable` | every source's signing secret is readable by whoever needs it |
 | `adapters_installed` | at least one adapter binary on PATH |
 | `allowlist_present` | sources with principal_id have identity allowlists |
+| `addressing` | every sender reaches something, every destination is reachable, no two destinations claim one adapter session |
 | `delivery_health` | human-directed delivery channels are healthy |
 | `durable_state` | the durable store opens; dead-letter backlog surfaced |
 

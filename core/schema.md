@@ -53,33 +53,52 @@
   underscores). Hyphens and other characters are silently stripped by the
   Claude Code channel layer (per the channels-reference spec).
 
-  Two `meta` keys are reserved as routing conventions. The daemon does
-  not interpret them; adapters MAY use them for sub-adapter routing.
+  Addressing keys. These are **requests from the sender**, which the daemon
+  interprets and may refuse; they only ever *narrow* what the sender's routes
+  already permit (config v2 — see the daemon README, "The addressing model").
 
-  - **`meta.target`** — Canonical sub-adapter routing label. If set,
-    the adapter SHOULD deliver only to sessions/processes that have
-    self-registered for that label (see the `agent_wake_subscribe`
-    tool in the opencode adapter). Adapters that do not implement
-    label routing MAY fall back to broadcast and SHOULD log a warning.
-    Labels are unauthenticated in v1; the namespace is shared and any
-    session can claim any label. Suitable for single-user deployments;
-    multi-user / multi-tenant deployments need scoped labels —
-    see [`design/self-register-plan.md`](../design/self-register-plan.md)
-    §Auth.
-  - **`meta.session_id`** — Direct opencode session-id targeting (legacy).
-    If both `meta.target` and `meta.session_id` are set, `meta.target`
-    wins.
+  - **`meta.destination`** — Deliver only to this named destination. A
+    destination is one addressable place: an adapter, optionally one
+    session of it. Naming a destination the sender has no route to is
+    `403` with `reason: destination_not_routed`, never a silent drop.
+  - **`meta.principal`** — Deliver only to the destinations belonging to
+    this `principal_id`. `403` with `reason: principal_not_routed` when
+    the sender has no route to it.
+  - **`meta.target`** — Notify this `principal_id` **out of band**
+    (webhook / email), which is a different capability from waking a
+    session and is authorised separately: default-deny, granted only by
+    the sender's `allowed_target_principals`. Historically this was also
+    a sub-adapter routing *label*, unauthenticated and claimable by any
+    session; `meta.destination` supersedes that use, because a
+    destination is declared by the operator rather than claimed by
+    whoever asks (BC-WAKE-017).
+  - **`meta.session_id`** — Direct opencode session-id targeting
+    (legacy). Superseded by a session-scoped destination, which the
+    daemon resolves and authorises rather than passing through.
 
   Identity meta keys (populated by the daemon after HMAC verification;
-  adapters pass them through to the harness and provenance layer):
+  adapters pass them through to the harness and provenance layer). Three
+  fields, three distinct questions — v1 had one field and it answered the
+  wrong one:
 
-  - **`meta.trigger_identity`** — `principal_id` of the source that
-    sent the event. Set by the daemon from the source's config
-    `principal_id` field. Absent when the source has no `principal_id`
-    configured (single-user dogfood default).
+  - **`meta.trigger_identity`** — *Who asked for this wake.* The
+    authenticated `X-AgentWake-Identity` value when the sender asserts
+    one (it is the identity the allowlist just checked, i.e. the one the
+    daemon actually authorised), otherwise the sender's configured
+    `identity`. Absent when neither is present. Before config v2 this was
+    taken from the source's `principal_id`, which on real deployments
+    held the identity of the agent being *woken* — so events were
+    attributed to their own addressee.
   - **`meta.actor_identity`** — `principal_id` of the harness operator.
     Set by the adapter (not the daemon) if the harness knows the
     operator's identity. Absent in single-user mode.
+
+  *Whose attention was requested* is deliberately **not** a `meta` key.
+  One event fanned out to several destinations has a different addressee
+  per recipient, so a field on the shared event body could only be wrong
+  for all but one of them. It travels on the `wake` frame instead, as
+  `destination.principal` — see the daemon↔adapter protocol in
+  `design/v1-daemon-spec.md` §4.
 - **`wake`** — `true` triggers an agent turn. `false` injects context silently
   (useful for "FYI" events that do not need immediate response).
 
