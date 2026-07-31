@@ -224,6 +224,18 @@ def _check_delivery_health() -> tuple[str, str]:
                     if isinstance(delivery_status, dict):
                         failing = delivery_status.get("failing_channels", [])
                         unknown = delivery_status.get("unknown_principals", [])
+                        lost = delivery_status.get("lost_alerts") or 0
+                        # A lost alert is a *fail*, not a warn: an alert that
+                        # could not even be dead-lettered is gone, and the only
+                        # other trace of it is one ERROR line in the daemon log.
+                        if lost:
+                            last = delivery_status.get("last_lost_alert") or "?"
+                            return "fail", (
+                                f"{lost} human alert(s) could not be dead-lettered "
+                                f"and are permanently lost (most recent: {last}) — "
+                                "the durable store was unavailable; grep the daemon "
+                                "log for 'LOST ALERT'"
+                            )
                         parts: list[str] = []
                         if failing:
                             chans = ", ".join(

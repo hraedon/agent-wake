@@ -544,3 +544,97 @@ def test_dead_letter_list_text_columns_stay_aligned(store, capsys):
     header, row = out.splitlines()[0], out.splitlines()[1]
     assert header.index("SOURCE") == row.index("dossier")
     assert header.index("REF") == row.index("ev-h1")
+
+
+@pytest.mark.asyncio
+async def test_redrive_of_a_partial_does_not_resend_the_delivered_channel(
+    tmp_path, monkeypatch, capsys
+):
+    """A replayed partial used to send a second real email.
+
+    The webhook carries an Idempotency-Key so a receiver can drop the duplicate;
+    email carries no idempotency token at all, so the human just gets it twice.
+    """
+    webhook_hits: list[dict] = []
+
+    async def handler(request):
+        webhook_hits.append(await request.json())
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    http = TestClient(TestServer(app))
+    await http.start_server()
+    try:
+        url = str(http.make_url("/hook"))
+        monkeypatch.setenv("AW_HOOK", "hook-secret")
+        monkeypatch.setenv("AW_SRC", "src-secret")
+        monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({
+            "version": 1,
+            "sources": {"dossier": {"secret_env": "AW_SRC"}},
+            "routing": {},
+            "state": {"dir": str(tmp_path / "state")},
+            "delivery": {
+                "operator": {
+                    "webhook": {"url": url, "secret_uri": "env://AW_HOOK"},
+                    "email": {
+                        "from_addr": "wake@example.com",
+                        "to_addr": "ops@example.com",
+                        "smtp_host": "127.0.0.1",
+                        "smtp_port": 1,
+                        "use_tls": False,
+                    },
+                }
+            },
+        }))
+        monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+        payload = _human_dl_payload(event_id="ev-partial")
+        payload["delivered_channels"] = ["webhook"]  # webhook already landed
+        store = WakeStore(tmp_path / "state" / "state.db")
+        dl_id = store.dead_letter(
+            kind="human_delivery",
+            source="dossier",
+            ref_id="ev-partial",
+            payload=payload,
+            error="human delivery partial: failed channels=['email']",
+        )
+        store.close()
+
+        code = await asyncio.to_thread(
+            cli_main, ["dead-letter", "redrive", dl_id, "--json"]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        # The email channel still fails (nothing listens on port 1), so the
+        # redrive fails — but the webhook must not have been posted to again.
+        assert code == 1, doc
+        assert webhook_hits == []
+        assert "webhook" not in doc["error"]["message"]
+        assert "email" in doc["error"]["message"]
+    finally:
+        await http.close()
+
+
+def test_redrive_carries_delivered_channels_forward(store, capsys, monkeypatch, tmp_path):
+    """A payload written without delivered_channels must still redrive."""
+    monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "legacy"))
+    legacy = WakeStore(tmp_path / "legacy" / "state.db")
+    try:
+        dl_id = legacy.dead_letter(
+            kind="human_delivery",
+            source="dossier",
+            ref_id="ev-legacy",
+            payload={  # no "delivered_channels" key at all
+                "event": {"event_id": "ev-legacy", "meta": {"target": "operator"}},
+                "principal_id": "operator",
+            },
+        )
+    finally:
+        legacy.close()
+    code, doc = _json_out(capsys, "dead-letter", "redrive", dl_id, "--json")
+    # No config on this box, so it stops at CONFIG_ERROR — the point is that it
+    # does not raise on the missing key.
+    assert code == 1
+    assert doc["error"]["code"] == "CONFIG_ERROR"

@@ -518,3 +518,160 @@ class TestDeadLetterWriteFailures:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestLostAlertIsObservable:
+    """A lost alert must be detectable above a log line (WI-001 review)."""
+
+    async def test_lost_alert_is_counted_and_surfaces_in_health(self, tmp_path):
+        fail = FakeChannel("webhook", {"status": "failed", "error": "x"})
+        store = WakeStore(tmp_path / "state.db")
+        store.close()  # the store is gone; the dead-letter write cannot land
+        hd = HumanDelivery(
+            _config_with_delivery(_webhook_principal()),
+            FakeResolver({"env://K": b"secret"}),
+            channels={"webhook": fail},
+            store=store,
+        )
+        assert hd.health.lost_alerts == 0
+        await hd.deliver(_event(target="operator"))
+
+        assert hd.health.lost_alerts == 1
+        summary = hd.health.summary()
+        assert summary["lost_alerts"] == 1
+        assert summary["last_lost_alert"] == "demo/evt-001"
+        # A lost alert alone must make health report unhealthy.
+        assert hd.health.has_failures() is True
+
+    async def test_a_healthy_run_reports_no_lost_alerts(self, tmp_path):
+        ok = FakeChannel("webhook", {"status": "delivered"})
+        store = WakeStore(tmp_path / "state.db")
+        try:
+            hd = HumanDelivery(
+                _config_with_delivery(_webhook_principal()),
+                FakeResolver({"env://K": b"secret"}),
+                channels={"webhook": ok},
+                store=store,
+            )
+            await hd.deliver(_event(target="operator"))
+            assert hd.health.summary()["lost_alerts"] == 0
+            assert hd.health.has_failures() is False
+        finally:
+            store.close()
+
+    async def test_a_dead_letter_that_lands_is_not_a_lost_alert(self, tmp_path):
+        fail = FakeChannel("webhook", {"status": "failed", "error": "x"})
+        store = WakeStore(tmp_path / "state.db")
+        try:
+            hd = HumanDelivery(
+                _config_with_delivery(_webhook_principal()),
+                FakeResolver({"env://K": b"secret"}),
+                channels={"webhook": fail},
+                store=store,
+            )
+            await hd.deliver(_event(target="operator"))
+            assert store.dead_letter_count() == 1
+            assert hd.health.lost_alerts == 0
+        finally:
+            store.close()
+
+
+class TestSkipChannelsOnRedrive:
+    """Replaying a partial delivery sends a real second email (WI-001 review)."""
+
+    def _two_channel_config(self):
+        return _config_with_delivery({
+            "operator": {
+                "webhook": {"url": "http://x", "secret_uri": "env://K"},
+                "email": {"to": "ops@example.com"},
+            }
+        })
+
+    async def test_partial_records_the_delivered_channel(self, tmp_path):
+        ok = FakeChannel("webhook", {"status": "delivered"})
+        bad = FakeChannel("email", {"status": "failed", "error": "smtp down"})
+        store = WakeStore(tmp_path / "state.db")
+        try:
+            hd = HumanDelivery(
+                self._two_channel_config(),
+                FakeResolver({"env://K": b"secret"}),
+                channels={"webhook": ok, "email": bad},
+                store=store,
+            )
+            assert (await hd.deliver(_event(target="operator")))["status"] == "partial"
+            entry = store.list_dead_letters(kind="human_delivery")[0]
+            assert entry.payload["delivered_channels"] == ["webhook"]
+        finally:
+            store.close()
+
+    async def test_skipped_channel_is_not_redelivered(self):
+        ok = FakeChannel("webhook", {"status": "delivered"})
+        email = FakeChannel("email", {"status": "delivered"})
+        hd = HumanDelivery(
+            self._two_channel_config(),
+            FakeResolver({"env://K": b"secret"}),
+            channels={"webhook": ok, "email": email},
+        )
+        result = await hd.deliver(
+            _event(target="operator"), skip_channels=["webhook"]
+        )
+        assert result["status"] == "delivered"
+        assert ok.deliver_calls == []  # the already-delivered channel was spared
+        assert len(email.deliver_calls) == 1
+        statuses = {c["channel"]: c["status"] for c in result["channels"]}
+        assert statuses == {"webhook": "skipped", "email": "delivered"}
+
+    async def test_all_channels_skipped_is_delivered_not_failed(self):
+        ok = FakeChannel("webhook", {"status": "delivered"})
+        hd = HumanDelivery(
+            _config_with_delivery(_webhook_principal()),
+            FakeResolver({"env://K": b"secret"}),
+            channels={"webhook": ok},
+        )
+        result = await hd.deliver(
+            _event(target="operator"), skip_channels=["webhook"]
+        )
+        assert result["status"] == "delivered"
+        assert ok.deliver_calls == []
+
+    async def test_a_second_failure_carries_the_skip_list_forward(self, tmp_path):
+        """Two redrives must not lose track of what already landed."""
+        email = FakeChannel("email", {"status": "failed", "error": "still down"})
+        store = WakeStore(tmp_path / "state.db")
+        try:
+            hd = HumanDelivery(
+                self._two_channel_config(),
+                FakeResolver({"env://K": b"secret"}),
+                channels={"webhook": FakeChannel("webhook", {}), "email": email},
+                store=store,
+            )
+            result = await hd.deliver(
+                _event(target="operator"), skip_channels=["webhook"]
+            )
+            assert result["status"] == "failed"
+            entry = store.list_dead_letters(kind="human_delivery")[0]
+            assert entry.payload["delivered_channels"] == ["webhook"]
+        finally:
+            store.close()
+
+    async def test_skip_is_recorded_through_a_cancellation(self, tmp_path):
+        slow = SlowFailChannel("email", delay=30.0)
+        store = WakeStore(tmp_path / "state.db")
+        try:
+            hd = HumanDelivery(
+                self._two_channel_config(),
+                FakeResolver({"env://K": b"secret"}),
+                channels={"webhook": FakeChannel("webhook", {}), "email": slow},
+                store=store,
+            )
+            task = asyncio.ensure_future(
+                hd.deliver(_event(target="operator"), skip_channels=["webhook"])
+            )
+            await asyncio.wait_for(slow.started.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            entry = store.list_dead_letters(kind="human_delivery")[0]
+            assert entry.payload["delivered_channels"] == ["webhook"]
+        finally:
+            store.close()

@@ -295,7 +295,14 @@ def _cmd_dead_letter_redrive(args: argparse.Namespace) -> int:
                     detail=f"id={entry.id}",
                 )
             principal_id = str(entry.payload.get("principal_id", ""))
-            result = asyncio.run(_redrive_human_delivery(cfg, event, principal_id))
+            # Channels that already landed are not re-sent: the webhook carries
+            # an Idempotency-Key, but email has no idempotency token at all, so
+            # replaying a partial delivery means a second real email.
+            already = entry.payload.get("delivered_channels")
+            skip = [str(c) for c in already] if isinstance(already, list) else []
+            result = asyncio.run(
+                _redrive_human_delivery(cfg, event, principal_id, skip_channels=skip)
+            )
             status = str(result.get("status", "unknown"))
             ok = status == "delivered"
             store.mark_redriven(
@@ -332,7 +339,8 @@ def _delivery_error(result: dict[str, Any]) -> str:
         parts = [
             f"{c.get('channel', '?')}: {c.get('error') or c.get('status')}"
             for c in channels
-            if isinstance(c, dict) and c.get("status") != "delivered"
+            if isinstance(c, dict)
+            and c.get("status") not in ("delivered", "skipped")
         ]
         if parts:
             return "; ".join(parts)
@@ -340,7 +348,11 @@ def _delivery_error(result: dict[str, Any]) -> str:
 
 
 async def _redrive_human_delivery(
-    cfg: dict[str, Any], event: dict[str, Any], principal_id: str
+    cfg: dict[str, Any],
+    event: dict[str, Any],
+    principal_id: str,
+    *,
+    skip_channels: list[str] | None = None,
 ) -> dict[str, Any]:
     from ..delivery import HumanDelivery
     from ..secrets.resolver import SecretResolver
@@ -358,7 +370,7 @@ async def _redrive_human_delivery(
     # the existing one is updated by the caller instead.
     delivery = HumanDelivery(cfg, SecretResolver(vault_cfg=cfg.get("vault")), store=None)
     try:
-        return await delivery.deliver(event)
+        return await delivery.deliver(event, skip_channels=skip_channels)
     finally:
         await delivery.close()
 
