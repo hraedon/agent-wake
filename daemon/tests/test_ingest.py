@@ -777,8 +777,10 @@ async def test_delivery_task_cancel_does_not_raise_from_the_callback(caplog):
         with caplog.at_level(logging.WARNING, logger="agent_waked.ingest"):
             await _post_delivery_event(cli)
             await asyncio.wait_for(started.wait(), timeout=2)
-            # This is what shutdown does.
-            await app.shutdown()
+            # This is what shutdown does. cleanup(), not shutdown(): the drain
+            # is on on_cleanup, because on_shutdown fires before aiohttp waits
+            # for in-flight request handlers.
+            await app.cleanup()
         assert "cancelled" in caplog.text
         assert loop_errors == []
     finally:
@@ -810,7 +812,7 @@ async def test_shutdown_drains_a_finishing_delivery():
     try:
         await _post_delivery_event(cli)
         await asyncio.wait_for(started.wait(), timeout=2)
-        await app.shutdown()
+        await app.cleanup()
         assert finished == ["evt-del-1"]
     finally:
         await cli.close()
@@ -825,7 +827,7 @@ async def test_shutdown_cancels_a_stuck_delivery_and_it_is_dead_lettered(tmp_pat
     what the daemon's shutdown ordering guarantees.
     """
     from agent_waked.delivery import HumanDelivery
-    from agent_waked.ingest import _DELIVERY_DRAIN_TIMEOUT
+    from agent_waked.ingest import DELIVERY_DRAIN_TIMEOUT
     from agent_waked.store import WakeStore
 
     class HangingChannel:
@@ -856,7 +858,7 @@ async def test_shutdown_cancels_a_stuck_delivery_and_it_is_dead_lettered(tmp_pat
             await _post_delivery_event(cli)
             await asyncio.wait_for(channel.started.wait(), timeout=2)
             await asyncio.wait_for(
-                app.shutdown(), timeout=_DELIVERY_DRAIN_TIMEOUT + 5
+                app.cleanup(), timeout=DELIVERY_DRAIN_TIMEOUT + 5
             )
             entries = store.list_dead_letters(kind="human_delivery")
             assert len(entries) == 1
@@ -875,6 +877,61 @@ async def test_shutdown_with_no_deliveries_is_a_no_op():
     cli = TestClient(TestServer(app))
     await cli.start_server()
     try:
-        await app.shutdown()
+        await app.cleanup()
+    finally:
+        await cli.close()
+
+
+def test_the_drain_is_on_on_cleanup_not_on_shutdown():
+    """The hook choice is the whole fix; assert it directly.
+
+    ``BaseRunner.cleanup()`` fires ``on_shutdown`` BEFORE it waits for in-flight
+    request handlers (``await self.shutdown()`` precedes
+    ``await self._server.shutdown(timeout)``), and ``post_root`` registers its
+    delivery task after two awaits. A drain on ``on_shutdown`` therefore runs
+    against an incomplete task set. Moving it back would silently reopen a lost
+    alert with a 202 response, which no other test in this file would catch.
+    """
+    app = create_ingest_app(_delivery_config(), MockRouter())
+    cleanup_names = [getattr(h, "__name__", "") for h in app.on_cleanup]
+    shutdown_names = [getattr(h, "__name__", "") for h in app.on_shutdown]
+    assert "_drain_delivery_tasks" in cleanup_names
+    assert "_drain_delivery_tasks" not in shutdown_names
+
+
+@pytest.mark.asyncio
+async def test_a_task_registered_during_the_drain_is_still_covered():
+    """The drain re-checks instead of returning on the first empty set."""
+    from agent_waked.ingest import DELIVERY_TASKS_KEY
+
+    config = _delivery_config()
+    app = create_ingest_app(config, MockRouter())
+    # on_cleanup only fires on a *frozen* app, which is what AppRunner /
+    # TestServer setup does — an unstarted app silently skips the signal.
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    tasks = app[DELIVERY_TASKS_KEY]
+    finished: list[str] = []
+
+    async def _late() -> None:
+        await asyncio.sleep(0.2)
+        finished.append("late")
+
+    async def _early() -> None:
+        # Registers a second task while the drain is already awaiting the first.
+        await asyncio.sleep(0.05)
+        t = asyncio.ensure_future(_late())
+        tasks.add(t)
+        t.add_done_callback(tasks.discard)
+        finished.append("early")
+
+    try:
+        first = asyncio.ensure_future(_early())
+        tasks.add(first)
+        first.add_done_callback(tasks.discard)
+
+        await app.cleanup()
+        assert finished == ["early", "late"]
+        assert not [t for t in tasks if not t.done()]
     finally:
         await cli.close()
