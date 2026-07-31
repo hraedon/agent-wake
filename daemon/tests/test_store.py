@@ -404,3 +404,111 @@ def test_dead_letter_retention_defaults(tmp_path, monkeypatch):
         assert store.dead_letter_max_rows == DEFAULT_DEAD_LETTER_MAX_ROWS
     finally:
         store.close()
+
+
+def test_dead_letter_ttl_eviction_of_unredriven_rows_is_loud(db_path, caplog):
+    """TTL expiry is data loss too, and the docs claimed it was logged.
+
+    It was not: the warning only covered the cap path, while the 30-day TTL is
+    the path that actually fires on a real daemon.
+    """
+    store = WakeStore(db_path, dead_letter_ttl_seconds=0.05)
+    try:
+        store.dead_letter(
+            kind="human_delivery", source="dossier", ref_id="ev-old", payload={}
+        )
+        time.sleep(0.08)
+        with caplog.at_level(logging.WARNING, logger="agent_waked.store"):
+            result = store.prune()
+        assert result["dead_letter_ttl_deleted"] == 1
+        assert "retention" in caplog.text
+        assert "never redriven" in caplog.text
+        assert "permanently lost" in caplog.text
+    finally:
+        store.close()
+
+
+def test_dead_letter_ttl_eviction_of_redriven_rows_is_quiet(db_path, caplog):
+    """An entry the operator already dealt with expiring is not a loss."""
+    store = WakeStore(db_path, dead_letter_ttl_seconds=0.05)
+    try:
+        dl_id = store.dead_letter(kind="reply", source="s", ref_id="r", payload={})
+        store.mark_redriven(dl_id, "ok")
+        time.sleep(0.08)
+        with caplog.at_level(logging.WARNING, logger="agent_waked.store"):
+            assert store.prune()["dead_letter_ttl_deleted"] == 1
+        assert "permanently lost" not in caplog.text
+    finally:
+        store.close()
+
+
+def test_pending_expiry_burst_does_not_spend_human_alerts(db_path):
+    """A queue-expiry burst must not evict the alerts addressed to people.
+
+    Age-only eviction got this exactly backwards: the pre-existing alerts are
+    by definition older than the rows the burst just promoted, so they went
+    first — and the promotions that caused the overflow survived.
+    """
+    store = WakeStore(
+        db_path, pending_ttl_seconds=0.05, dead_letter_max_rows=3
+    )
+    try:
+        for i in range(3):
+            store.dead_letter(
+                kind="human_delivery",
+                source="dossier",
+                ref_id=f"alert-{i}",
+                payload={"event": {"event_id": f"alert-{i}"}, "principal_id": "op"},
+            )
+        for i in range(40):
+            store.enqueue_pending(_event(f"burst-{i:02d}"))
+        time.sleep(0.08)
+
+        store.prune()  # promotes the burst, overflowing the cap
+        store.prune()  # the sweep that has to choose what to keep
+
+        survivors = store.list_dead_letters(limit=100, include_redriven=True)
+        assert len(survivors) == 3
+        assert {e.ref_id for e in survivors} == {"alert-0", "alert-1", "alert-2"}
+        assert {e.kind for e in survivors} == {"human_delivery"}
+    finally:
+        store.close()
+
+
+def test_dead_letter_cap_eviction_ranks_reply_above_next_session(db_path):
+    store = WakeStore(db_path, dead_letter_max_rows=1)
+    try:
+        store.dead_letter(kind="reply", source="s", ref_id="the-reply", payload={})
+        store.dead_letter(kind="next_session", source="s", ref_id="the-event",
+                          payload={"event_id": "e", "source": "s", "meta": {}})
+        store.prune()
+        survivors = store.list_dead_letters(limit=10)
+        assert [e.ref_id for e in survivors] == ["the-reply"]
+    finally:
+        store.close()
+
+
+def test_dead_letter_cap_default_exceeds_the_pending_queue_cap():
+    """A single full-queue expiry burst must not be able to overflow the table.
+
+    prune() promotes every expired pending row in one pass, so a cap below
+    DEFAULT_PENDING_MAX_ROWS makes self-inflicted eviction the default.
+    """
+    from agent_waked.store import DEFAULT_PENDING_MAX_ROWS
+
+    assert DEFAULT_DEAD_LETTER_MAX_ROWS > DEFAULT_PENDING_MAX_ROWS
+
+
+def test_prune_pluralises_its_warning(db_path, caplog):
+    store = WakeStore(db_path, dead_letter_max_rows=1)
+    try:
+        store.dead_letter(kind="reply", source="s", ref_id="a", payload={})
+        store.dead_letter(kind="reply", source="s", ref_id="b", payload={})
+        with caplog.at_level(logging.WARNING, logger="agent_waked.store"):
+            store.prune()
+        assert "evicted 1 entry that was never redriven" in caplog.text
+        assert "entries that was" not in caplog.text
+        assert "entry that were" not in caplog.text
+        assert "1 rows" not in caplog.text
+    finally:
+        store.close()

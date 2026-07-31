@@ -178,8 +178,17 @@ single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
   be re-dispatched with `dead-letter redrive`.
 - The dead-letter table is bounded like the others. Entries hold full event
   bodies, so they expire after `dead_letter_ttl_seconds` and are capped at
-  `dead_letter_max_rows` (already-redriven entries evicted first). Evicting an
-  entry nobody redrove is logged as a warning.
+  `dead_letter_max_rows`. Losing an entry nobody redrove is logged as a warning
+  on **both** paths — expiry and cap eviction.
+- When the cap bites, eviction ranks on operator value, not age: already-redriven
+  entries first, then `next_session` (a re-queueable event that already sat
+  unclaimed for its whole TTL), then `reply`, then `human_delivery` last. Keep
+  `dead_letter_max_rows` above `pending_max_rows` — one `prune` promotes every
+  expired queue entry into this table at once, so a smaller cap lets a queue
+  expiry burst evict unrelated human alerts.
+- Redriving a *partial* delivery only retries the channels that failed. The
+  outbound webhook carries an `Idempotency-Key`, but email carries no
+  idempotency token, so replaying everything would mean a second real email.
 
 ```jsonc
 // config.json
@@ -193,7 +202,7 @@ single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
   "pending_max_rows": 10000,
   "pending_max_attempts": 5,
   "dead_letter_ttl_seconds": 2592000,
-  "dead_letter_max_rows": 5000
+  "dead_letter_max_rows": 20000       // keep above pending_max_rows
 }
 ```
 

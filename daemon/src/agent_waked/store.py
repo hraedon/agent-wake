@@ -39,8 +39,12 @@ The dead-letter table is bounded the same way, by ``dead_letter_ttl_seconds``
 (30 days, deliberately generous — nobody looks at a dead-letter the same day)
 and ``dead_letter_max_rows``.  It has to be: rows carry full event bodies, and
 both expired pending events and failed human deliveries add to it, so an
-unattended daemon would grow the state db forever.  Evicting a row that was
-never redriven is real data loss and is logged at warning.
+unattended daemon would grow the state db forever.  Dropping a row that was
+never redriven is real data loss, on the TTL path as much as the cap path, and
+both log it at warning.  When the cap does bite, eviction ranks on operator
+value — already-redriven first, then ``next_session``, then ``reply``, then
+``human_delivery`` — so a burst of expiring queue entries cannot spend the
+human alerts.
 """
 
 from __future__ import annotations
@@ -73,7 +77,14 @@ DEFAULT_PENDING_MAX_ATTEMPTS = 5
 # delivery adds one, so an unattended daemon would otherwise grow the state db
 # without limit.
 DEFAULT_DEAD_LETTER_TTL_SECONDS = 30 * 24 * 3600
-DEFAULT_DEAD_LETTER_MAX_ROWS = 5_000
+# Strictly larger than DEFAULT_PENDING_MAX_ROWS, and that relationship is the
+# point rather than a coincidence. ``prune`` promotes every expired pending
+# event into this table in one pass, so a cap below the queue's own cap means a
+# single full-queue expiry burst can overflow the table on its own and start
+# evicting unrelated human alerts. Sizing it above the queue means the burst
+# fits; the kind-ranked eviction order is the second line of defence for when
+# an operator has narrowed the gap.
+DEFAULT_DEAD_LETTER_MAX_ROWS = 2 * DEFAULT_PENDING_MAX_ROWS
 
 # Amortised pruning: run the retention sweep once every N dedupe inserts.
 _PRUNE_INTERVAL = 256
@@ -497,15 +508,20 @@ class WakeStore:
         The dead-letter table is swept too, which it was not before: it grew
         without limit while holding full event bodies, and nothing but a manual
         ``dead-letter purge`` ever removed a row. Rows past
-        ``dead_letter_ttl_seconds`` go first, then the oldest rows above
-        ``dead_letter_max_rows``, already-redriven ones preferentially. Dropping
-        an entry that was never redriven is data loss, so it is logged at
-        warning — the cap is a backstop against an unbounded state db, not a
-        retention policy an operator should be relying on.
+        ``dead_letter_ttl_seconds`` go first, then rows above
+        ``dead_letter_max_rows``, evicted in order of operator value: anything
+        already redriven, then by kind (``next_session`` before ``reply`` before
+        ``human_delivery`` — a re-queueable event that already sat unclaimed for
+        its whole TTL is worth less than an alert addressed to a person that
+        never arrived), then oldest first. Dropping an entry that was never
+        redriven is data loss on *either* path, and both log it at warning.
 
-        Sweep order matters: the dead-letter sweep runs *before* expired
-        pending events are dead-lettered, so a row created by this same call is
-        never immediately eligible for its own cap eviction.
+        Sweep order matters: the dead-letter sweep runs *before* expired pending
+        events are dead-lettered, so a row created by this same call is never
+        immediately eligible for its own cap eviction. That is only true one
+        prune deep, which is why the default cap is sized above the pending
+        queue's cap and why eviction ranks on kind — otherwise a burst of
+        expiring events evicts the human alerts on the *next* sweep instead.
         """
         now = time.time()
         expired_pending: list[PendingEvent] = []
@@ -536,9 +552,19 @@ class WakeStore:
                     "DELETE FROM pending WHERE expires_at <= ?", (now,)
                 )
 
+            # TTL sweep. Count what is about to be lost *before* deleting it:
+            # the docs claimed un-redriven eviction was always logged, and on
+            # this path — the dominant one, since the TTL fires long before any
+            # sane cap — it silently was not.
+            ttl_cutoff = now - self.dead_letter_ttl_seconds
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM dead_letter WHERE created_at < ? "
+                "AND (redrive_status IS NULL OR redrive_status != 'ok')",
+                (ttl_cutoff,),
+            ).fetchone()
+            ttl_unredriven = int(row["n"])
             cur = self._conn.execute(
-                "DELETE FROM dead_letter WHERE created_at < ?",
-                (now - self.dead_letter_ttl_seconds,),
+                "DELETE FROM dead_letter WHERE created_at < ?", (ttl_cutoff,)
             )
             dead_letter_ttl_deleted = int(cur.rowcount)
 
@@ -547,17 +573,32 @@ class WakeStore:
             ).fetchone()
             dl_overflow = int(row["n"]) - self.dead_letter_max_rows
             dead_letter_cap_deleted = 0
-            unredriven_evicted = 0
+            cap_unredriven = 0
             if dl_overflow > 0:
-                # Oldest first, but spend the redriven rows before the ones an
-                # operator has not dealt with yet.
+                # Eviction order is operator value, not just age:
+                #   1. anything already redriven — the operator is done with it;
+                #   2. then by kind, cheapest first. A next_session entry is a
+                #      re-queueable event that already sat unclaimed for its
+                #      whole TTL; a human_delivery entry is an alert addressed
+                #      to a person that never arrived. Age alone got this
+                #      backwards: a burst of expiring pending events (the queue
+                #      cap is larger than this table's) evicted every
+                #      pre-existing human alert in favour of the promotions that
+                #      caused the overflow.
+                #   3. then oldest first.
                 victims = self._conn.execute(
                     "SELECT id, redrive_status FROM dead_letter "
-                    "ORDER BY (redrive_status = 'ok') DESC, created_at ASC "
+                    "ORDER BY (redrive_status = 'ok') DESC, "
+                    "  CASE kind "
+                    "    WHEN 'human_delivery' THEN 2 "
+                    "    WHEN 'reply' THEN 1 "
+                    "    ELSE 0 "
+                    "  END ASC, "
+                    "  created_at ASC "
                     "LIMIT ?",
                     (dl_overflow,),
                 ).fetchall()
-                unredriven_evicted = sum(
+                cap_unredriven = sum(
                     1 for v in victims if v["redrive_status"] != "ok"
                 )
                 self._conn.executemany(
@@ -569,14 +610,25 @@ class WakeStore:
             self._conn.commit()
             self._inserts_since_prune = 0
 
-        if unredriven_evicted:
+        if ttl_unredriven:
             log.warning(
-                "dead-letter cap (%d rows) evicted %d entr%s that were never "
-                "redriven — deliveries have been permanently lost; raise "
-                "state.dead_letter_max_rows or redrive/purge more often",
+                "dead-letter retention (%.0fs) expired %s that %s never "
+                "redriven — %s permanently lost; redrive or purge sooner, or "
+                "raise state.dead_letter_ttl_seconds",
+                self.dead_letter_ttl_seconds,
+                _entries(ttl_unredriven),
+                "was" if ttl_unredriven == 1 else "were",
+                "that delivery is" if ttl_unredriven == 1 else "those deliveries are",
+            )
+        if cap_unredriven:
+            log.warning(
+                "dead-letter cap (max %d) evicted %s that %s never redriven "
+                "— %s permanently lost; raise state.dead_letter_max_rows or "
+                "redrive/purge more often",
                 self.dead_letter_max_rows,
-                unredriven_evicted,
-                "y" if unredriven_evicted == 1 else "ies",
+                _entries(cap_unredriven),
+                "was" if cap_unredriven == 1 else "were",
+                "that delivery is" if cap_unredriven == 1 else "those deliveries are",
             )
 
         for pe in expired_pending:
@@ -602,6 +654,11 @@ class WakeStore:
         if any(result.values()):
             log.info("store prune %s", result)
         return result
+
+
+def _entries(n: int) -> str:
+    """Pluralise a row count for a log line ("1 entry" / "3 entries")."""
+    return f"{n} entry" if n == 1 else f"{n} entries"
 
 
 def _pending_from_row(row: sqlite3.Row, attempts_delta: int = 0) -> PendingEvent:
