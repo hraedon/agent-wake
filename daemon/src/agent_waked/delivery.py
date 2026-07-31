@@ -18,12 +18,18 @@ deduplicate retries.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .channels.email import EmailChannel
 from .channels.webhook import WebhookChannel
 from .secrets.resolver import SecretResolver
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
+    from .store import WakeStore
 
 log = logging.getLogger("agent_waked.delivery")
 
@@ -35,6 +41,8 @@ class DeliveryHealth:
         self._failures: dict[tuple[str, str], dict[str, Any]] = {}
         self._unknown_principals: set[str] = set()
         self._delivered: int = 0
+        self._lost_alerts: int = 0
+        self._last_lost_alert: str | None = None
 
     def record_success(self, channel: str, principal_id: str) -> None:
         self._failures.pop((channel, principal_id), None)
@@ -50,6 +58,20 @@ class DeliveryHealth:
     def record_unknown_principal(self, principal_id: str) -> None:
         self._unknown_principals.add(principal_id)
 
+    def record_lost_alert(self, ref: str) -> None:
+        """An alert that could not even be dead-lettered.
+
+        The worst state the daemon has, and until this counter existed it was
+        only a log line — nothing a test, ``/health`` or ``doctor`` could see, so
+        a regression that started losing alerts would have gone on looking green.
+        """
+        self._lost_alerts += 1
+        self._last_lost_alert = ref
+
+    @property
+    def lost_alerts(self) -> int:
+        return self._lost_alerts
+
     def summary(self) -> dict[str, Any]:
         failing_channels = [
             {"channel": ch, "principal_id": pid, **info}
@@ -59,10 +81,21 @@ class DeliveryHealth:
             "delivered": self._delivered,
             "failing_channels": failing_channels,
             "unknown_principals": sorted(self._unknown_principals),
+            "lost_alerts": self._lost_alerts,
+            "last_lost_alert": self._last_lost_alert,
         }
 
     def has_failures(self) -> bool:
-        return bool(self._failures or self._unknown_principals)
+        return bool(
+            self._failures or self._unknown_principals or self._lost_alerts
+        )
+
+
+def _channels_with(results: list[dict[str, Any]], status: str) -> list[str]:
+    """Channel names in *results* whose status is *status*."""
+    return [
+        str(r.get("channel", "?")) for r in results if r.get("status") == status
+    ]
 
 
 class HumanDelivery:
@@ -71,6 +104,11 @@ class HumanDelivery:
     The daemon constructs one ``HumanDelivery`` with all registered channel
     adapters (webhook, email).  Each channel handles its own secret custody
     via the shared ``SecretResolver``.
+
+    When a ``WakeStore`` is supplied, a delivery that does not end
+    ``delivered`` is dead-lettered as ``kind="human_delivery"``, mirroring the
+    reply / next_session paths, so a routed alert that never landed survives a
+    restart and can be redriven (``agent-wake dead-letter redrive``).
     """
 
     def __init__(
@@ -79,10 +117,12 @@ class HumanDelivery:
         resolver: SecretResolver,
         health: DeliveryHealth | None = None,
         channels: dict[str, Any] | None = None,
+        store: WakeStore | None = None,
     ) -> None:
         self._config = config
         self._resolver = resolver
         self._health = health or DeliveryHealth()
+        self._store = store
         if channels is not None:
             self._channels = channels
         else:
@@ -90,6 +130,72 @@ class HumanDelivery:
                 "webhook": WebhookChannel(),
                 "email": EmailChannel(),
             }
+
+    def _dead_letter(
+        self,
+        *,
+        event: dict[str, Any],
+        principal_id: str,
+        error: str,
+        delivered_channels: list[str] | None = None,
+    ) -> str | None:
+        """Persist a permanently-failed human delivery for operator redrive.
+
+        Without this, a channel that never recovers left nothing but an
+        in-memory health entry lost on restart — a routed alert could vanish
+        with no durable trace.
+
+        **Never raises.** Every caller is on a path that has already failed;
+        this is the last line of defence, and a last line of defence that can
+        itself throw turns a failed delivery into an unhandled exception in a
+        background task. Two real cases: the store was closed under us (a
+        shutdown race — ``sqlite3.ProgrammingError``), or the write lost the
+        lock race past sqlite's busy timeout (``OperationalError: database is
+        locked``). Both are logged loudly with the identifying metadata; the
+        event body is deliberately *not* logged, because dead-letter payloads
+        carry user content and log sinks are not the durable store.
+
+        A transient lock is already covered by sqlite's connect-level busy
+        timeout (5s), so there is no retry loop here — a failure at this point
+        means the store is genuinely unavailable, not merely contended.
+        """
+        if self._store is None:
+            return None
+        source = str(event.get("source", ""))
+        ref_id = str(event.get("event_id", ""))
+        try:
+            return self._store.dead_letter(
+                kind="human_delivery",
+                source=source,
+                ref_id=ref_id,
+                payload={
+                    "event": event,
+                    "principal_id": principal_id,
+                    # Recorded so a redrive can skip what already landed: a
+                    # replayed email is a second real email to a person.
+                    "delivered_channels": delivered_channels or [],
+                },
+                error=error,
+                attempts=1,
+            )
+        except Exception as exc:
+            # Counted, not just logged: a non-throwing last line of defence is
+            # right, but it is also what turns a lost alert into a log line
+            # nobody greps. health.lost_alerts surfaces on /health and fails the
+            # doctor delivery check, so this is visible above the log.
+            self._health.record_lost_alert(f"{source}/{ref_id}")
+            log.error(
+                "LOST ALERT: could not dead-letter human delivery "
+                "source=%s event_id=%s principal_id=%s delivery_error=%r "
+                "store_error=%s",
+                source,
+                ref_id,
+                principal_id,
+                error,
+                exc,
+                exc_info=exc,
+            )
+            return None
 
     @property
     def health(self) -> DeliveryHealth:
@@ -107,8 +213,22 @@ class HumanDelivery:
             return None
         return result
 
-    async def deliver(self, event: dict[str, Any]) -> dict[str, Any]:
+    async def deliver(
+        self,
+        event: dict[str, Any],
+        *,
+        skip_channels: Collection[str] | None = None,
+    ) -> dict[str, Any]:
         """Deliver *event* to the principal named in ``meta.target``.
+
+        *skip_channels* names channels to leave alone because a previous attempt
+        already landed on them. Only the redrive path passes it, and it exists
+        because replaying a partial delivery is not harmless: the webhook
+        channel carries an ``Idempotency-Key`` so a receiver can drop the
+        duplicate, but **email has no idempotency token at all** — a redriven
+        partial sends the human a second real email. Skipped channels are
+        reported as ``{"status": "skipped"}`` and do not affect the overall
+        status.
 
         Returns a dict:
           - ``{"status": "no_target"}`` — no ``meta.target`` set; no delivery.
@@ -119,6 +239,7 @@ class HumanDelivery:
           - ``{"status": "delivered"|"failed"|"partial", ...}`` — dispatch
             result across all configured channels.
         """
+        skip = set(skip_channels or ())
         meta = event.get("meta", {})
         if not isinstance(meta, dict):
             return {"status": "no_target"}
@@ -145,56 +266,115 @@ class HumanDelivery:
                 principal_id,
                 event.get("event_id", "?"),
             )
+            self._dead_letter(
+                event=event,
+                principal_id=principal_id,
+                error="principal has no delivery channels configured",
+            )
             return {"status": "no_channels", "principal_id": principal_id}
 
         results: list[dict[str, Any]] = []
         any_delivered = False
         any_failed = False
 
-        for kind, ch_cfg in channels_cfg.items():
-            channel = self._channels.get(kind)
-            if channel is None:
-                log.error(
-                    "no adapter registered for channel kind %r (principal %r)",
-                    kind,
-                    principal_id,
-                )
-                any_failed = True
-                self._health.record_failure(kind, principal_id, "no adapter")
-                results.append(
-                    {"channel": kind, "status": "failed", "error": "no adapter"}
-                )
-                continue
+        try:
+            for kind, ch_cfg in channels_cfg.items():
+                if kind in skip:
+                    log.info(
+                        "skipping channel %r for principal %r: already delivered "
+                        "on an earlier attempt event_id=%s",
+                        kind,
+                        principal_id,
+                        event.get("event_id", "?"),
+                    )
+                    results.append({"channel": kind, "status": "skipped"})
+                    continue
 
-            try:
-                result = await channel.deliver(event, ch_cfg, self._resolver)
-            except Exception as exc:
-                log.exception(
-                    "channel %r raised for principal %r: %s",
-                    kind,
-                    principal_id,
-                    exc,
-                )
-                result = {"status": "failed", "error": str(exc)}
+                channel = self._channels.get(kind)
+                if channel is None:
+                    log.error(
+                        "no adapter registered for channel kind %r (principal %r)",
+                        kind,
+                        principal_id,
+                    )
+                    any_failed = True
+                    self._health.record_failure(kind, principal_id, "no adapter")
+                    results.append(
+                        {"channel": kind, "status": "failed", "error": "no adapter"}
+                    )
+                    continue
 
-            status = result.get("status", "unknown")
-            if status == "delivered":
-                self._health.record_success(kind, principal_id)
-                any_delivered = True
-            else:
-                self._health.record_failure(
-                    kind, principal_id, result.get("error", status)
-                )
-                any_failed = True
+                try:
+                    result = await channel.deliver(event, ch_cfg, self._resolver)
+                except Exception as exc:
+                    log.exception(
+                        "channel %r raised for principal %r: %s",
+                        kind,
+                        principal_id,
+                        exc,
+                    )
+                    result = {"status": "failed", "error": str(exc)}
 
-            results.append({"channel": kind, **result})
+                status = result.get("status", "unknown")
+                if status == "delivered":
+                    self._health.record_success(kind, principal_id)
+                    any_delivered = True
+                else:
+                    self._health.record_failure(
+                        kind, principal_id, result.get("error", status)
+                    )
+                    any_failed = True
 
-        if any_delivered and not any_failed:
+                results.append({"channel": kind, **result})
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException: it does not pass through the
+            # ``except Exception`` above, and without this arm a SIGTERM while
+            # a channel sits in 1s/4s/16s backoff cancelled the task and the
+            # alert left *no* durable trace — precisely the gap the
+            # dead-letter table exists to close. The store write is
+            # synchronous, so it completes before the cancellation is
+            # re-raised; the daemon's shutdown order guarantees the store is
+            # still open at this point (see main._run).
+            delivered = _channels_with(results, "delivered") + list(skip)
+            self._dead_letter(
+                event=event,
+                principal_id=principal_id,
+                error=(
+                    "human delivery cancelled mid-flight (daemon shutdown); "
+                    f"delivered channels={delivered}"
+                ),
+                delivered_channels=delivered,
+            )
+            raise
+
+        attempted = [r for r in results if r.get("status") != "skipped"]
+        if not attempted:
+            # Every channel had already landed on an earlier attempt, so there
+            # is nothing left owing — not a failure.
+            overall = "delivered"
+        elif any_delivered and not any_failed:
             overall = "delivered"
         elif any_delivered and any_failed:
             overall = "partial"
         else:
             overall = "failed"
+
+        if overall != "delivered":
+            failed_channels = [
+                r.get("channel", "?")
+                for r in attempted
+                if r.get("status") != "delivered"
+            ]
+            self._dead_letter(
+                event=event,
+                principal_id=principal_id,
+                error=f"human delivery {overall}: failed channels={failed_channels}",
+                # Carry forward what has landed across attempts, so a second
+                # redrive still knows not to re-send.
+                delivered_channels=(
+                    _channels_with(results, "delivered") + list(skip)
+                ),
+            )
 
         return {
             "status": overall,

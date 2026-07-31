@@ -28,6 +28,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "mypy>=1.10",
+    "ruff>=0.16,<1",
     # CLI contract v1 conformance kit (Plan 018 WI-2 / Plan 019 B3 / WI-023). A
     # published wheel that requires py>=3.12, so it is installed only on the >=3.12
     # lanes (the daemon still supports 3.11 at runtime; the conformance test skips
@@ -37,6 +38,17 @@ dev = [
     # tests/test_conformance_meta_guard.py, never imported by runtime code.
     "agent-suite-conformance==1.1.0; python_version >= '3.12'",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Full-E family selection matching regista/cairn: ruff's standard E (incl.
+# E501 line-length, now enforced at 100) + F + I (isort) + N (naming) + W +
+# UP (pyupgrade) + RUF. The noisy ruff-0.16 expanded defaults (TRY/BLE/PLW/
+# SIM/S) remain deliberately excluded.
+select = ["E", "F", "I", "N", "W", "UP", "RUF"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

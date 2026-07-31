@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_waked.channels.email import EmailChannel, render_email, _redact_addr
+from agent_waked.channels.email import EmailChannel, _redact_addr, render_email
 
 
 class FakeResolver:

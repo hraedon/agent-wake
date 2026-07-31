@@ -1,17 +1,12 @@
 """Tests for suite_config — suite.env parsing and precedence."""
 
-import os
 from pathlib import Path
-
-import pytest
 
 from agent_waked.suite_config import (
     _parse_env_file,
-    resolve_suite_env,
-    regista_config,
     is_suite_configured,
-    per_user_path,
-    system_path,
+    regista_config,
+    resolve_suite_env,
 )
 
 
@@ -69,7 +64,10 @@ def test_resolve_precedence_process_env_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_SUITE_CONFIG", str(user_env))
 
     # System file doesn't exist in this test
-    monkeypatch.setattr("agent_waked.suite_config.system_path", lambda: tmp_path / "nonexistent-system.env")
+    monkeypatch.setattr(
+        "agent_waked.suite_config.system_path",
+        lambda: tmp_path / "nonexistent-system.env",
+    )
 
     # Process env should win
     monkeypatch.setenv("REGISTA_DSN", "postgresql://from-process/db")
@@ -101,7 +99,10 @@ def test_resolve_only_returns_canonical_vars(tmp_path, monkeypatch):
         "AGENT_WAKE_CONFIG=/custom/path",
     ])
     monkeypatch.setenv("AGENT_SUITE_CONFIG", str(user_env))
-    monkeypatch.setattr("agent_waked.suite_config.system_path", lambda: tmp_path / "nonexistent.env")
+    monkeypatch.setattr(
+        "agent_waked.suite_config.system_path",
+        lambda: tmp_path / "nonexistent.env",
+    )
     monkeypatch.delenv("REGISTA_DSN", raising=False)
 
     result = resolve_suite_env()
@@ -118,7 +119,10 @@ def test_regista_config_with_ssl(tmp_path, monkeypatch):
         "AGENT_WAKE_PROJECT=my-project",
     ])
     monkeypatch.setenv("AGENT_SUITE_CONFIG", str(user_env))
-    monkeypatch.setattr("agent_waked.suite_config.system_path", lambda: tmp_path / "nonexistent.env")
+    monkeypatch.setattr(
+        "agent_waked.suite_config.system_path",
+        lambda: tmp_path / "nonexistent.env",
+    )
     monkeypatch.delenv("REGISTA_DSN", raising=False)
     monkeypatch.delenv("REGISTA_REQUIRE_SSL", raising=False)
     monkeypatch.delenv("AGENT_WAKE_PROJECT", raising=False)
@@ -131,8 +135,14 @@ def test_regista_config_with_ssl(tmp_path, monkeypatch):
 
 def test_regista_config_defaults(tmp_path, monkeypatch):
     """When nothing is configured, regista_config returns Nones."""
-    monkeypatch.setattr("agent_waked.suite_config.per_user_path", lambda: tmp_path / "nonexistent.env")
-    monkeypatch.setattr("agent_waked.suite_config.system_path", lambda: tmp_path / "nonexistent2.env")
+    monkeypatch.setattr(
+        "agent_waked.suite_config.per_user_path",
+        lambda: tmp_path / "nonexistent.env",
+    )
+    monkeypatch.setattr(
+        "agent_waked.suite_config.system_path",
+        lambda: tmp_path / "nonexistent2.env",
+    )
     for var in ("REGISTA_DSN", "REGISTA_KEY_PATH", "REGISTA_REQUIRE_SSL", "AGENT_WAKE_PROJECT"):
         monkeypatch.delenv(var, raising=False)
 

@@ -1,7 +1,6 @@
 """Tests for agent_waked.config — schema validation, URI forms, backwards compat."""
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -220,7 +219,7 @@ def test_vault_block_missing_addr_raises(tmp_path, monkeypatch):
         }
     })
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
-    with pytest.raises(ConfigError, match="vault.addr"):
+    with pytest.raises(ConfigError, match=r"vault.addr"):
         load_config()
 
 
@@ -364,3 +363,59 @@ def test_state_block_must_be_object(tmp_path, monkeypatch):
 def test_state_can_be_disabled(tmp_path, monkeypatch):
     _state_cfg(tmp_path, monkeypatch, {"enabled": False})
     assert load_config()["state"]["enabled"] is False
+
+
+# ── allowed_trigger_identities shape (WI-001) ─────────────────────────────────
+
+
+def _identities_cfg(tmp_path, monkeypatch, value):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {
+            "demo": {"secret": "env://AW_S", "allowed_trigger_identities": value},
+        },
+    })
+    monkeypatch.setenv("AW_S", "x")
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+
+def test_allowed_trigger_identities_rejects_a_bare_string(tmp_path, monkeypatch):
+    """A string would become a *substring* allowlist, not an identity list.
+
+    gating.check_trigger_identity does ``header not in allowed``, so "alice"
+    as a string admits the sender "ali".
+    """
+    _identities_cfg(tmp_path, monkeypatch, "alice")
+    with pytest.raises(ConfigError, match="must be a list"):
+        load_config()
+
+
+def test_allowed_trigger_identities_rejects_non_string_entries(tmp_path, monkeypatch):
+    _identities_cfg(tmp_path, monkeypatch, ["alice", 7])
+    with pytest.raises(ConfigError, match="non-empty string"):
+        load_config()
+
+
+def test_allowed_trigger_identities_rejects_empty_entries(tmp_path, monkeypatch):
+    _identities_cfg(tmp_path, monkeypatch, ["alice", ""])
+    with pytest.raises(ConfigError, match="non-empty string"):
+        load_config()
+
+
+def test_allowed_trigger_identities_list_is_accepted(tmp_path, monkeypatch):
+    _identities_cfg(tmp_path, monkeypatch, ["alice", "bob"])
+    cfg = load_config()
+    assert cfg["sources"]["demo"]["allowed_trigger_identities"] == ["alice", "bob"]
+
+
+def test_allowed_trigger_identities_absent_is_accepted(tmp_path, monkeypatch):
+    """No allowlist means any HMAC-valid sender — documented v0 behaviour."""
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret": "env://AW_S"}},
+    })
+    monkeypatch.setenv("AW_S", "x")
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    assert load_config()["sources"]["demo"]["allowed_trigger_identities"] is None

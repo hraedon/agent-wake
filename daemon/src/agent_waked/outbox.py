@@ -30,7 +30,15 @@ _ALLOWED_SCHEMES = ("http:", "https:")
 
 
 def _validate_callback_url(url: str) -> str | None:
-    """Return an error string if *url* is unsafe, or None if valid."""
+    """Return an error string if *url* is unsafe, or None if valid.
+
+    Scheme only, deliberately. Unlike a principal's webhook URL, a callback
+    URL is operator-configured per source and is not steerable per request by
+    a sender, so the forbidden-IP-range guard (``netguard``) is not applied
+    here: an operator running the daemon alongside a service on ``127.0.0.1``
+    has a legitimate reason to point a callback at it. The redirect ban on the
+    POST below is what closes the amplifier this path actually had.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return f"disallowed scheme {parsed.scheme!r}"
@@ -156,6 +164,11 @@ class Outbox:
                 async with self._session.post(
                     callback_url,
                     json=payload,
+                    # A hijacked-but-valid callback could otherwise 301 this
+                    # body to an internal target (e.g. cloud metadata) that
+                    # nothing validates. See _validate_callback_url for why
+                    # the scheme check alone is the bar on this path.
+                    allow_redirects=False,
                 ) as resp:
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     if 200 <= resp.status < 300:

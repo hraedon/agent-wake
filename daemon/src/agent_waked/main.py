@@ -20,7 +20,12 @@ from aiohttp import web
 
 from .config import ConfigError, load_config
 from .delivery import HumanDelivery
-from .ingest import create_ingest_app
+from .ingest import (
+    DELIVERY_DRAIN_TIMEOUT,
+    FORCE_DRAIN_TIMEOUT,
+    create_ingest_app,
+    force_drain_delivery_tasks,
+)
 from .outbox import Outbox
 from .router import Router
 from .secrets.resolver import SecretResolver
@@ -29,7 +34,15 @@ from .store import StoreError, WakeStore, open_store
 
 log = logging.getLogger("agent_waked")
 
-_DRAIN_TIMEOUT = 5
+# Shutdown budget. These nest, and they have to: _DRAIN_TIMEOUT bounds the whole
+# of ``runner.cleanup()``, inside which aiohttp waits _HANDLER_GRACE for
+# in-flight request handlers and then the ingest app's on_cleanup hook drains
+# in-flight deliveries for DELIVERY_DRAIN_TIMEOUT. If the outer bound fired
+# first, ``wait_for`` would cancel ``runner.cleanup()`` and abandon the very
+# handlers and tasks the inner budgets exist to drain — which is what happened
+# when the outer bound was 5s and aiohttp's shutdown_timeout was its 60s default.
+_HANDLER_GRACE = 2.0
+_DRAIN_TIMEOUT = _HANDLER_GRACE + DELIVERY_DRAIN_TIMEOUT + FORCE_DRAIN_TIMEOUT + 1.0
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -148,7 +161,11 @@ def _warn_non_loopback_bind(host: str, cfg: dict[str, Any], explicit: bool = Fal
         )
 
 
-def _reload_config(cfg: dict[str, Any], router: Router, resolver: SecretResolver | None = None) -> None:
+def _reload_config(
+    cfg: dict[str, Any],
+    router: Router,
+    resolver: SecretResolver | None = None,
+) -> None:
     """SIGHUP handler: reload config, update shared state in-place.
 
     Per spec §6.3:
@@ -197,7 +214,11 @@ def _reload_config(cfg: dict[str, Any], router: Router, resolver: SecretResolver
         if key not in new_cfg:
             del cfg[key]
 
-    log.info("config reloaded: %d sources, routing=%s", len(cfg.get("sources", {})), bool(cfg.get("routing")))
+    log.info(
+        "config reloaded: %d sources, routing=%s",
+        len(cfg.get("sources", {})),
+        bool(cfg.get("routing")),
+    )
     # Refresh all cached secrets so vault-mode picks up rotations immediately.
     if resolver is not None:
         import asyncio as _asyncio
@@ -290,7 +311,9 @@ async def _run() -> int:
     router = Router(cfg, store=store)
     resolver = SecretResolver(vault_cfg=cfg.get("vault"))
 
-    delivery = HumanDelivery(cfg, resolver)
+    # store=store: a human-directed delivery that never lands is dead-lettered
+    # rather than leaving only an in-memory health entry lost on restart.
+    delivery = HumanDelivery(cfg, resolver, store=store)
 
     outbox = Outbox(cfg, store=store)
     await outbox.start()
@@ -307,7 +330,7 @@ async def _run() -> int:
         delivery=delivery,
         store=store,
     )
-    runner = web.AppRunner(app)
+    runner = _make_runner(app)
     try:
         await runner.setup()
         site = web.TCPSite(runner, host, port)
@@ -337,7 +360,7 @@ async def _run() -> int:
         reload_event.clear()
         stop_task = asyncio.ensure_future(stop_event.wait())
         reload_task = asyncio.ensure_future(reload_event.wait())
-        done, pending = await asyncio.wait(
+        _done, pending = await asyncio.wait(
             [stop_task, reload_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -347,16 +370,72 @@ async def _run() -> int:
             _reload_config(cfg, router, resolver=resolver)
 
     log.info("shutting down")
+    await _shutdown(
+        socket_server=socket_server,
+        runner=runner,
+        outbox=outbox,
+        delivery=delivery,
+        store=store,
+        app=app,
+    )
+    return 0
+
+
+def _make_runner(app: web.Application) -> web.AppRunner:
+    """Build the ingest runner with an explicit handler grace period.
+
+    aiohttp's ``shutdown_timeout`` defaults to **60 seconds** — twelve times the
+    old whole-shutdown budget. Left at the default, ``_shutdown``'s ``wait_for``
+    fired first and cancelled ``runner.cleanup()`` partway through, abandoning
+    in-flight handlers and any delivery task they had registered. Setting it
+    here is what makes the nested budget in ``_DRAIN_TIMEOUT`` true.
+    """
+    return web.AppRunner(app, shutdown_timeout=_HANDLER_GRACE)
+
+
+async def _shutdown(
+    *,
+    socket_server: SocketServer,
+    runner: web.AppRunner,
+    outbox: Outbox,
+    delivery: HumanDelivery,
+    store: WakeStore | None,
+    app: web.Application | None = None,
+) -> None:
+    """Tear the daemon down in the one order that keeps durability.
+
+    This used to be inline and it used to be wrong: the store was closed
+    *before* ``runner.cleanup()``, so an in-flight human delivery still sitting
+    in 1s/4s/16s retry backoff either wrote its dead-letter into a closed
+    connection (``sqlite3.ProgrammingError``) or was cancelled with nothing
+    recorded at all — losing exactly the alerts the dead-letter table exists to
+    preserve. Extracted so the ordering is a named, testable invariant rather
+    than a property of statement order in a 100-line function.
+
+    1. Stop accepting new work — unix socket, then the HTTP listener.
+    2. Let ``runner.cleanup()`` finish in-flight request handlers and then drain
+       in-flight deliveries (the ingest app's ``on_cleanup`` hook), so the
+       cancellation arm of ``HumanDelivery.deliver`` writes its dead-letter
+       while the store is still open.
+    3. Force-drain as a backstop. Step 2 is bounded, and a bound can be hit: if
+       ``wait_for`` cancels ``runner.cleanup()`` partway through, the on_cleanup
+       hook never ran to completion and tasks can still be alive. Cancelling
+       them *here*, before the store closes, is what makes "nothing can still
+       want the store" true rather than merely likely.
+    4. Close the outbound HTTP sessions, once nothing is using them.
+    5. Close the store LAST.
+    """
     socket_server.close()
+    try:
+        await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
+    except TimeoutError:
+        log.warning("runner cleanup timed out after %.0fs", _DRAIN_TIMEOUT)
+    if app is not None:
+        await force_drain_delivery_tasks(app)
     await outbox.close()
     await delivery.close()
     if store is not None:
         store.close()
-    try:
-        await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
-    except asyncio.TimeoutError:
-        log.warning("runner cleanup timed out after %ds", _DRAIN_TIMEOUT)
-    return 0
 
 
 def main() -> int:

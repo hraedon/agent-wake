@@ -83,8 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    from ..doctor import run_checks, format_text
     import json
+
+    from ..doctor import format_text, run_checks
 
     report = run_checks()
     if args.json:

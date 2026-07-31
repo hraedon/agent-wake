@@ -26,6 +26,59 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("agent_waked.ingest")
 
+# How long shutdown waits for in-flight human deliveries before cancelling
+# them. Deliberately shorter than a full webhook retry ladder (1s+4s+16s plus
+# per-attempt timeouts): a delivery still in backoff when the daemon is asked
+# to stop is cancelled, and ``HumanDelivery.deliver`` dead-letters on
+# cancellation, so the alert is preserved durably rather than by making
+# shutdown hang for a minute. ``main`` sizes its own ``_DRAIN_TIMEOUT`` from
+# this so the budgets nest instead of racing.
+DELIVERY_DRAIN_TIMEOUT = 3.0
+
+# How long the hard backstop waits for cancellations to land. The dead-letter
+# write in the CancelledError arm is synchronous, so this only has to cover
+# scheduling, not I/O.
+FORCE_DRAIN_TIMEOUT = 2.0
+
+# The in-flight delivery task set, published on the app so ``main._shutdown``
+# can guarantee the invariant it owns — nothing may still want the store once
+# it closes — without reaching into a closure. A typed AppKey rather than a bare
+# string so mypy checks the read side and aiohttp does not warn.
+DELIVERY_TASKS_KEY: web.AppKey[set[asyncio.Task[Any]]] = web.AppKey(
+    "agent_waked.delivery_tasks"
+)
+
+
+async def force_drain_delivery_tasks(app: web.Application) -> int:
+    """Cancel every surviving delivery task and wait for it. Returns the count.
+
+    The last thing standing between a lost alert and the store closing. Each
+    cancellation runs ``HumanDelivery.deliver``'s CancelledError arm, which
+    dead-letters synchronously — so this must complete before ``store.close()``.
+    Safe to call more than once, and safe when nothing is in flight.
+    """
+    tasks = app.get(DELIVERY_TASKS_KEY) or set()
+    pending = [t for t in tasks if not t.done()]
+    if not pending:
+        return 0
+    log.warning(
+        "cancelling %d human deliver%s still in flight at shutdown; they are "
+        "dead-lettered for redrive",
+        len(pending),
+        "y" if len(pending) == 1 else "ies",
+    )
+    for task in pending:
+        task.cancel()
+    await asyncio.wait(pending, timeout=FORCE_DRAIN_TIMEOUT)
+    survivors = [t for t in pending if not t.done()]
+    if survivors:
+        log.error(
+            "%d human delivery task(s) did not finish cancelling; their "
+            "dead-letter writes may be lost",
+            len(survivors),
+        )
+    return len(pending)
+
 
 class SourceMismatchError(ValueError):
     """Raised when the body's claimed source does not match the authenticated header source.
@@ -158,6 +211,74 @@ def create_ingest_app(
     store: "WakeStore | None" = None,
 ) -> web.Application:
     dedupe = Dedupe(store=store)
+    # RUF006: an ``ensure_future`` task nobody holds a reference to can be
+    # garbage-collected mid-flight, silently dropping the delivery. Same
+    # treatment as ``Router._background_tasks``. The set is also what lets
+    # shutdown drain in-flight deliveries before the store closes.
+    delivery_tasks: set[asyncio.Task[Any]] = set()
+
+    def _on_delivery_done(task: asyncio.Task[Any]) -> None:
+        delivery_tasks.discard(task)
+        if task.cancelled():
+            # ``task.exception()`` *raises* CancelledError on a cancelled
+            # task, so this guard is not cosmetic: without it every shutdown
+            # raised out of the done-callback. Cancellation is not a lost
+            # alert — HumanDelivery.deliver dead-letters on its way out.
+            log.warning("human delivery task cancelled (shutdown?)")
+            return
+        exc = task.exception()
+        if exc is not None:
+            # exc_info=exc, not log.exception(): this callback runs outside
+            # any except block, where implicit exc_info is empty and the
+            # traceback — the only reason to log here — is lost.
+            log.error("human delivery task crashed: %s", exc, exc_info=exc)
+
+    async def _drain_delivery_tasks(_app: web.Application) -> None:
+        """Let in-flight human deliveries finish before the store closes.
+
+        Registered on ``app.on_cleanup``, **not** ``on_shutdown``, and that
+        distinction is the whole bug this hook was first written with.
+        ``BaseRunner.cleanup()`` runs::
+
+            site.stop() → sleep(0) → pre_shutdown()
+                        → await self.shutdown()          # on_shutdown fires
+                        → await self._server.shutdown(t) # handlers finish
+                        → await self._cleanup_server()   # on_cleanup fires
+
+        ``post_root`` awaits *before* it registers the delivery task — a secret
+        resolution that may be a vault round-trip, then reading the body. A
+        drain on ``on_shutdown`` therefore runs while that handler is still
+        mid-flight, sees an empty set, returns, and the handler goes on to spawn
+        a task nobody will ever drain: the sender is told 202 "dispatched", the
+        store closes under the orphan, and its dead-letter write hits a closed
+        database. On ``on_cleanup`` the handlers have already finished (or been
+        force-closed), so the set we look at is complete.
+
+        The loop below is the belt to that braces: it re-checks rather than
+        returning on the first empty set, so a task registered while we were
+        awaiting is still covered.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + DELIVERY_DRAIN_TIMEOUT
+        announced = False
+        while True:
+            pending = [t for t in delivery_tasks if not t.done()]
+            if not pending:
+                return
+            if not announced:
+                log.info(
+                    "draining %d in-flight human deliver%s (grace %.0fs)",
+                    len(pending),
+                    "y" if len(pending) == 1 else "ies",
+                    DELIVERY_DRAIN_TIMEOUT,
+                )
+                announced = True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.wait(pending, timeout=remaining)
+
+        await force_drain_delivery_tasks(_app)
 
     async def post_root(request: web.Request) -> web.Response:
         raw_body = await request.read()
@@ -278,7 +399,9 @@ def create_ingest_app(
                             "event_id": event_id,
                         },
                     )
-                asyncio.ensure_future(delivery.deliver(event))
+                task = asyncio.ensure_future(delivery.deliver(event))
+                delivery_tasks.add(task)
+                task.add_done_callback(_on_delivery_done)
                 delivery_result = {
                     "status": "dispatched",
                     "principal_id": principal_id,
@@ -320,6 +443,17 @@ def create_ingest_app(
         return _json_response(200, body)
 
     app = web.Application()
+    app[DELIVERY_TASKS_KEY] = delivery_tasks
+    # on_cleanup, NOT on_shutdown: on_shutdown fires before AppRunner waits for
+    # in-flight request handlers, and post_root registers its delivery task
+    # after two awaits. See _drain_delivery_tasks for the full sequence.
+    #
+    # The ignore below is an upstream typing mismatch: aiohttp declares its
+    # signals as ``Signal[Callable[[Application], Awaitable[None]]]``, but
+    # aiosignal's Signal is now variadic (``Signal[*Ts]``), so that declared
+    # element type collapses to a callable *taking* a handler. The runtime
+    # contract is the documented one.
+    app.on_cleanup.append(_drain_delivery_tasks)  # type: ignore[arg-type]
     app.router.add_get("/", health_handler)
     app.router.add_post("/", post_root)
     app.router.add_route("*", "/{path:.*}", default_handler)

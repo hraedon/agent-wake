@@ -12,8 +12,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from agent_waked.cli import build_parser
 from agent_waked.cli import main as cli_main
-from agent_waked.store import WakeStore
+from agent_waked.store import DEAD_LETTER_KINDS, WakeStore
 
 
 @pytest.fixture
@@ -279,7 +280,7 @@ def test_pending_prune_expires_into_dead_letter(state_dir, capsys, monkeypatch):
 def test_pending_source_filter(store, capsys):
     store.enqueue_pending({"event_id": "a", "source": "alpha", "meta": {}})
     store.enqueue_pending({"event_id": "b", "source": "beta", "meta": {}})
-    code, doc = _json_out(capsys, "pending", "list", "--source", "beta", "--json")
+    _code, doc = _json_out(capsys, "pending", "list", "--source", "beta", "--json")
     assert [d["event_id"] for d in doc["pending"]] == ["b"]
 
 
@@ -287,3 +288,353 @@ def test_unknown_subcommand_is_a_usage_error(store):
     with pytest.raises(SystemExit) as exc:
         cli_main(["dead-letter", "teleport"])
     assert exc.value.code == 2
+
+
+# ── human_delivery: listable and redrivable (WI-001 M2) ───────────────────────
+
+
+def _human_dl_payload(event_id: str = "ev-h1", target: str = "operator") -> dict:
+    return {
+        "event": {
+            "v": 0,
+            "event_id": event_id,
+            "source": "dossier",
+            "kind": "awaiting_accept",
+            "content": "WI-42 awaits your accept",
+            "meta": {"target": target, "deep_link": "https://suite/WI-42"},
+            "wake": True,
+        },
+        "principal_id": target,
+    }
+
+
+def test_dead_letter_kind_filter_accepts_human_delivery(store, capsys):
+    """--kind human_delivery used to be an argparse usage error (exit 2).
+
+    A kind the daemon writes but the CLI refuses to filter on is a durable
+    record an operator cannot find.
+    """
+    store.dead_letter(kind="reply", source="s", ref_id="r", payload={})
+    store.dead_letter(
+        kind="human_delivery",
+        source="dossier",
+        ref_id="ev-h1",
+        payload=_human_dl_payload(),
+        error="human delivery failed: failed channels=['webhook']",
+    )
+    code, doc = _json_out(
+        capsys, "dead-letter", "list", "--kind", "human_delivery", "--json"
+    )
+    assert code == 0
+    assert [d["kind"] for d in doc["dead_letters"]] == ["human_delivery"]
+    assert doc["dead_letters"][0]["ref_id"] == "ev-h1"
+
+
+def test_dead_letter_list_kind_choices_cover_every_store_kind():
+    """The argparse choices are derived from the store, so they cannot drift."""
+    parser = build_parser()
+    dl = parser._subparsers._group_actions[0].choices["dead-letter"]  # type: ignore[union-attr]
+    list_p = dl._subparsers._group_actions[0].choices["list"]  # type: ignore[union-attr]
+    kind_action = next(a for a in list_p._actions if a.dest == "kind")
+    assert tuple(kind_action.choices or ()) == DEAD_LETTER_KINDS
+
+
+def test_every_dead_letter_kind_has_a_redrive_branch(store, capsys):
+    """No kind may fall through to 'unknown dead-letter kind'.
+
+    That fall-through is what made a routed human alert permanently
+    un-redrivable: durably recorded, and refused by the only tool that could
+    act on it.
+    """
+    payloads = {
+        "reply": {"source": "s", "reply_id": "r"},
+        "next_session": {"event_id": "ev-x", "source": "s", "meta": {}},
+        "human_delivery": _human_dl_payload(event_id="ev-h9"),
+    }
+    assert set(payloads) == set(DEAD_LETTER_KINDS)
+    for kind, payload in payloads.items():
+        dl_id = store.dead_letter(
+            kind=kind, source="s", ref_id=f"ref-{kind}", payload=payload
+        )
+        code, doc = _json_out(capsys, "dead-letter", "redrive", dl_id, "--json")
+        if code != 0:
+            assert doc["error"]["code"] != "INTERNAL_ERROR", (kind, doc)
+
+
+def test_redrive_human_delivery_without_config_is_an_error(store, capsys):
+    dl_id = store.dead_letter(
+        kind="human_delivery",
+        source="dossier",
+        ref_id="ev-h1",
+        payload=_human_dl_payload(),
+    )
+    code, doc = _json_out(capsys, "dead-letter", "redrive", dl_id, "--json")
+    assert code == 1
+    assert doc["error"]["code"] == "CONFIG_ERROR"
+
+
+def test_redrive_human_delivery_with_unusable_payload_is_an_error(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("AW_SRC", "src-secret")
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "version": 1,
+        "sources": {"dossier": {"secret_env": "AW_SRC"}},
+        "routing": {},
+        "state": {"dir": str(tmp_path / "state")},
+    }))
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    store = WakeStore(tmp_path / "state" / "state.db")
+    dl_id = store.dead_letter(
+        kind="human_delivery",
+        source="dossier",
+        ref_id="ev-broken",
+        payload={"principal_id": "operator"},  # no "event"
+    )
+    store.close()
+
+    code, doc = _json_out(capsys, "dead-letter", "redrive", dl_id, "--json")
+    assert code == 1
+    assert doc["error"]["code"] == "INTERNAL_ERROR"
+    assert "event" in doc["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_redrive_human_delivery_delivers_for_real(tmp_path, monkeypatch, capsys):
+    """A dead-lettered human alert is really re-dispatched to the principal."""
+    received: list[dict] = []
+
+    async def handler(request):
+        received.append(await request.json())
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    http = TestClient(TestServer(app))
+    await http.start_server()
+    try:
+        url = str(http.make_url("/hook"))
+        monkeypatch.setenv("AW_HOOK", "hook-secret")
+        monkeypatch.setenv("AW_SRC", "src-secret")
+        monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({
+            "version": 1,
+            "sources": {"dossier": {"secret_env": "AW_SRC"}},
+            "routing": {},
+            "state": {"dir": str(tmp_path / "state")},
+            "delivery": {
+                "operator": {
+                    "webhook": {"url": url, "secret_uri": "env://AW_HOOK"},
+                }
+            },
+        }))
+        monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+        store = WakeStore(tmp_path / "state" / "state.db")
+        dl_id = store.dead_letter(
+            kind="human_delivery",
+            source="dossier",
+            ref_id="ev-h1",
+            payload=_human_dl_payload(),
+            error="human delivery failed: failed channels=['webhook']",
+        )
+        store.close()
+
+        code = await asyncio.to_thread(
+            cli_main, ["dead-letter", "redrive", dl_id, "--json"]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        assert code == 0, doc
+        assert doc["action"] == "delivered"
+        assert len(received) == 1
+        assert received[0]["event_id"] == "ev-h1"
+        assert received[0]["meta"]["deep_link"] == "https://suite/WI-42"
+
+        store = WakeStore(tmp_path / "state" / "state.db")
+        try:
+            entry = store.get_dead_letter(dl_id)
+            assert entry is not None
+            assert entry.redrive_status == "ok"
+            assert entry.redriven_at is not None
+            # Redriven entries drop out of the default listing.
+            assert store.list_dead_letters(kind="human_delivery") == []
+        finally:
+            store.close()
+    finally:
+        await http.close()
+
+
+@pytest.mark.asyncio
+async def test_redrive_human_delivery_failure_is_retryable(tmp_path, monkeypatch, capsys):
+    """A redrive that fails again reports retryable and does not double-record."""
+    async def handler(request):
+        return web.Response(status=503)
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    http = TestClient(TestServer(app))
+    await http.start_server()
+    try:
+        url = str(http.make_url("/hook"))
+        monkeypatch.setenv("AW_HOOK", "hook-secret")
+        monkeypatch.setenv("AW_SRC", "src-secret")
+        monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({
+            "version": 1,
+            "sources": {"dossier": {"secret_env": "AW_SRC"}},
+            "routing": {},
+            "state": {"dir": str(tmp_path / "state")},
+            "delivery": {
+                "operator": {
+                    "webhook": {"url": url, "secret_uri": "env://AW_HOOK"},
+                }
+            },
+        }))
+        monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+        store = WakeStore(tmp_path / "state" / "state.db")
+        dl_id = store.dead_letter(
+            kind="human_delivery",
+            source="dossier",
+            ref_id="ev-h2",
+            payload=_human_dl_payload(event_id="ev-h2"),
+        )
+        store.close()
+
+        # Keep the retry ladder short: the channel's own defaults are 1/4/16s.
+        monkeypatch.setattr(
+            "agent_waked.channels.webhook._BACKOFF_DELAYS", (0.01, 0.01, 0.01)
+        )
+        code = await asyncio.to_thread(
+            cli_main, ["dead-letter", "redrive", dl_id, "--json"]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        assert code == 1
+        assert doc["error"]["code"] == "REDRIVE_FAILED"
+        assert doc["error"]["retryable"] is True
+
+        store = WakeStore(tmp_path / "state" / "state.db")
+        try:
+            # Marked failed, still listed, and NOT duplicated by the redrive.
+            assert store.dead_letter_count() == 1
+            entry = store.get_dead_letter(dl_id)
+            assert entry is not None
+            assert entry.redrive_status == "failed"
+        finally:
+            store.close()
+    finally:
+        await http.close()
+
+
+def test_dead_letter_list_text_columns_stay_aligned(store, capsys):
+    """"human_delivery" is 14 chars; a 13-wide KIND column shifted every row."""
+    store.dead_letter(
+        kind="human_delivery",
+        source="dossier",
+        ref_id="ev-h1",
+        payload=_human_dl_payload(),
+    )
+    code, out, _ = _run(capsys, "dead-letter", "list")
+    assert code == 0
+    header, row = out.splitlines()[0], out.splitlines()[1]
+    assert header.index("SOURCE") == row.index("dossier")
+    assert header.index("REF") == row.index("ev-h1")
+
+
+@pytest.mark.asyncio
+async def test_redrive_of_a_partial_does_not_resend_the_delivered_channel(
+    tmp_path, monkeypatch, capsys
+):
+    """A replayed partial used to send a second real email.
+
+    The webhook carries an Idempotency-Key so a receiver can drop the duplicate;
+    email carries no idempotency token at all, so the human just gets it twice.
+    """
+    webhook_hits: list[dict] = []
+
+    async def handler(request):
+        webhook_hits.append(await request.json())
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    http = TestClient(TestServer(app))
+    await http.start_server()
+    try:
+        url = str(http.make_url("/hook"))
+        monkeypatch.setenv("AW_HOOK", "hook-secret")
+        monkeypatch.setenv("AW_SRC", "src-secret")
+        monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "state"))
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({
+            "version": 1,
+            "sources": {"dossier": {"secret_env": "AW_SRC"}},
+            "routing": {},
+            "state": {"dir": str(tmp_path / "state")},
+            "delivery": {
+                "operator": {
+                    "webhook": {"url": url, "secret_uri": "env://AW_HOOK"},
+                    "email": {
+                        "from_addr": "wake@example.com",
+                        "to_addr": "ops@example.com",
+                        "smtp_host": "127.0.0.1",
+                        "smtp_port": 1,
+                        "use_tls": False,
+                    },
+                }
+            },
+        }))
+        monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+        payload = _human_dl_payload(event_id="ev-partial")
+        payload["delivered_channels"] = ["webhook"]  # webhook already landed
+        store = WakeStore(tmp_path / "state" / "state.db")
+        dl_id = store.dead_letter(
+            kind="human_delivery",
+            source="dossier",
+            ref_id="ev-partial",
+            payload=payload,
+            error="human delivery partial: failed channels=['email']",
+        )
+        store.close()
+
+        code = await asyncio.to_thread(
+            cli_main, ["dead-letter", "redrive", dl_id, "--json"]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        # The email channel still fails (nothing listens on port 1), so the
+        # redrive fails — but the webhook must not have been posted to again.
+        assert code == 1, doc
+        assert webhook_hits == []
+        assert "webhook" not in doc["error"]["message"]
+        assert "email" in doc["error"]["message"]
+    finally:
+        await http.close()
+
+
+def test_redrive_carries_delivered_channels_forward(store, capsys, monkeypatch, tmp_path):
+    """A payload written without delivered_channels must still redrive."""
+    monkeypatch.setenv("AGENT_WAKE_STATE_DIR", str(tmp_path / "legacy"))
+    legacy = WakeStore(tmp_path / "legacy" / "state.db")
+    try:
+        dl_id = legacy.dead_letter(
+            kind="human_delivery",
+            source="dossier",
+            ref_id="ev-legacy",
+            payload={  # no "delivered_channels" key at all
+                "event": {"event_id": "ev-legacy", "meta": {"target": "operator"}},
+                "principal_id": "operator",
+            },
+        )
+    finally:
+        legacy.close()
+    code, doc = _json_out(capsys, "dead-letter", "redrive", dl_id, "--json")
+    # No config on this box, so it stops at CONFIG_ERROR — the point is that it
+    # does not raise on the missing key.
+    assert code == 1
+    assert doc["error"]["code"] == "CONFIG_ERROR"

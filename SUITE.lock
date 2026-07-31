@@ -1,0 +1,10 @@
+# SUITE.lock — agent-wake face compatibility manifest.
+#
+# agent-wake has no regista dependency and therefore no [spine] block.
+# This file exists so the cross-repo lock-agreement check (Plan 019
+# B2-generalize) can verify the component's identity against the umbrella
+# agent-suite/SUITE.lock without reporting a missing lock.
+
+[component]
+name = "agent-wake"
+version = "0.1.0"

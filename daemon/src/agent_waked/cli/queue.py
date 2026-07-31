@@ -8,7 +8,8 @@ Commands
 --------
 ``agent-wake dead-letter list``      — what failed, when, why
 ``agent-wake dead-letter show ID``   — the full payload of one entry
-``agent-wake dead-letter redrive ID``— retry it for real
+``agent-wake dead-letter redrive ID``— retry it for real (any kind in
+                                       ``store.DEAD_LETTER_KINDS``)
 ``agent-wake dead-letter purge``     — bounded cleanup
 ``agent-wake pending list``          — what is queued for the next session
 ``agent-wake pending prune``         — apply retention now
@@ -26,15 +27,15 @@ import argparse
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..config import ConfigError, load_config
-from ..store import WakeStore, open_store
+from ..store import DEAD_LETTER_KINDS, WakeStore, open_store
 
 
 def _build_queue_parsers(
-    sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """Add the ``dead-letter`` and ``pending`` subcommands."""
     dl = sub.add_parser(
@@ -44,8 +45,13 @@ def _build_queue_parsers(
 
     list_p = dl_sub.add_parser("list", help="List dead-lettered deliveries")
     list_p.add_argument("--json", action="store_true", help="Emit a JSON document")
+    # Derived from the store's own tuple, never a second hand-maintained list:
+    # a kind the daemon can write but the CLI refuses to filter on is a
+    # dead-letter an operator cannot find.
     list_p.add_argument(
-        "--kind", choices=["reply", "next_session"], help="Filter by delivery kind"
+        "--kind",
+        choices=list(DEAD_LETTER_KINDS),
+        help="Filter by delivery kind",
     )
     list_p.add_argument("--limit", type=int, default=50, help="Max rows (default 50)")
     list_p.add_argument(
@@ -118,7 +124,7 @@ def _open(cfg: dict[str, Any] | None = None) -> WakeStore:
 def _ts(value: float | None) -> str | None:
     if value is None:
         return None
-    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(
+    return datetime.fromtimestamp(value, tz=UTC).isoformat(
         timespec="seconds"
     )
 
@@ -153,12 +159,16 @@ def _cmd_dead_letter_list(args: argparse.Namespace) -> int:
             return _emit(True, {"ok": True, "dead_letters": rows}, "")
         if not rows:
             return _emit(False, {}, "No dead-lettered deliveries.")
+        # Column widths are derived from the data, not guessed: "human_delivery"
+        # is 14 characters and overflowed the old 13-wide KIND column, shifting
+        # every field after it out of alignment.
+        kind_w = max(len("KIND"), *(len(k) for k in DEAD_LETTER_KINDS))
         lines = [
-            f"{'ID':28} {'KIND':13} {'SOURCE':16} {'REF':26} CREATED",
+            f"{'ID':28} {'KIND':{kind_w}} {'SOURCE':16} {'REF':26} CREATED",
         ]
         for r in rows:
             lines.append(
-                f"{r['id']:28} {r['kind']:13} {r['source'][:16]:16} "
+                f"{r['id']:28} {r['kind']:{kind_w}} {r['source'][:16]:16} "
                 f"{r['ref_id'][:26]:26} {r['created_at']}"
             )
             if r.get("error"):
@@ -198,9 +208,16 @@ def _cmd_dead_letter_redrive(args: argparse.Namespace) -> int:
 
     ``reply`` entries are re-POSTed here and now, reusing the daemon's own
     ``Outbox`` so retry/backoff/URL-validation semantics are identical to the
-    live path. ``next_session`` entries are put back on the durable queue for
-    the daemon to hand to the next session — the CLI has no socket to any
-    adapter, and inventing one would be a second delivery path.
+    live path. ``human_delivery`` entries are re-dispatched the same way,
+    through the daemon's own ``HumanDelivery``. ``next_session`` entries are
+    put back on the durable queue for the daemon to hand to the next session —
+    the CLI has no socket to any adapter, and inventing one would be a second
+    delivery path.
+
+    Every kind in ``store.DEAD_LETTER_KINDS`` must have a branch here. The
+    fall-through at the end is a forward-compat guard, not a supported state:
+    reaching it means the daemon can durably record something an operator has
+    no way to act on.
     """
     from . import emit_error
 
@@ -261,6 +278,51 @@ def _cmd_dead_letter_redrive(args: argparse.Namespace) -> int:
                 f"(HTTP {result.get('http_status')}).",
             )
 
+        if entry.kind == "human_delivery":
+            if not cfg:
+                return emit_error(
+                    "CONFIG_ERROR",
+                    "redriving a human delivery needs a loadable config (for "
+                    "the principal's delivery channels)",
+                    use_json=args.json,
+                )
+            event = entry.payload.get("event")
+            if not isinstance(event, dict):
+                return emit_error(
+                    "INTERNAL_ERROR",
+                    "dead-letter payload has no 'event' object to redeliver",
+                    use_json=args.json,
+                    detail=f"id={entry.id}",
+                )
+            principal_id = str(entry.payload.get("principal_id", ""))
+            # Channels that already landed are not re-sent: the webhook carries
+            # an Idempotency-Key, but email has no idempotency token at all, so
+            # replaying a partial delivery means a second real email.
+            already = entry.payload.get("delivered_channels")
+            skip = [str(c) for c in already] if isinstance(already, list) else []
+            result = asyncio.run(
+                _redrive_human_delivery(cfg, event, principal_id, skip_channels=skip)
+            )
+            status = str(result.get("status", "unknown"))
+            ok = status == "delivered"
+            store.mark_redriven(
+                entry.id, "ok" if ok else "failed", error=_delivery_error(result)
+            )
+            if not ok:
+                return emit_error(
+                    "REDRIVE_FAILED",
+                    f"human delivery redrive failed: {_delivery_error(result)}",
+                    use_json=args.json,
+                    detail=f"status={status}",
+                    retryable=True,
+                )
+            return _emit(
+                args.json,
+                {"ok": True, "id": entry.id, "action": "delivered", "result": result},
+                f"Redrive delivered alert {entry.ref_id} to principal "
+                f"{result.get('principal_id')!r}.",
+            )
+
         return emit_error(
             "INTERNAL_ERROR",
             f"unknown dead-letter kind {entry.kind!r}",
@@ -268,6 +330,49 @@ def _cmd_dead_letter_redrive(args: argparse.Namespace) -> int:
         )
     finally:
         store.close()
+
+
+def _delivery_error(result: dict[str, Any]) -> str:
+    """Summarise a HumanDelivery result's per-channel errors for the operator."""
+    channels = result.get("channels")
+    if isinstance(channels, list):
+        parts = [
+            f"{c.get('channel', '?')}: {c.get('error') or c.get('status')}"
+            for c in channels
+            if isinstance(c, dict)
+            and c.get("status") not in ("delivered", "skipped")
+        ]
+        if parts:
+            return "; ".join(parts)
+    return str(result.get("status", "unknown"))
+
+
+async def _redrive_human_delivery(
+    cfg: dict[str, Any],
+    event: dict[str, Any],
+    principal_id: str,
+    *,
+    skip_channels: list[str] | None = None,
+) -> dict[str, Any]:
+    from ..delivery import HumanDelivery
+    from ..secrets.resolver import SecretResolver
+
+    # ``deliver`` routes on ``meta.target``; the stored event carries it, but
+    # re-stamp from the recorded principal_id so a payload written by an older
+    # daemon (or hand-edited) still reaches the principal it was meant for.
+    if principal_id:
+        event = dict(event)
+        meta = dict(event.get("meta") or {})
+        meta["target"] = principal_id
+        event["meta"] = meta
+
+    # store=None: a failed redrive must not create a *second* dead-letter row;
+    # the existing one is updated by the caller instead.
+    delivery = HumanDelivery(cfg, SecretResolver(vault_cfg=cfg.get("vault")), store=None)
+    try:
+        return await delivery.deliver(event, skip_channels=skip_channels)
+    finally:
+        await delivery.close()
 
 
 async def _redrive_reply(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:

@@ -235,6 +235,15 @@ def _webhook_cfg(url: str) -> dict:
         "100.64.0.1",      # CGNAT 100.64/10 (RFC 6598 — is_private is False)
         "0.0.0.0",         # unspecified
         "224.0.0.1",       # multicast
+        # IPv4-mapped v6 forms. CGNAT specifically was a live bypass here:
+        # ``IPv6Address in IPv4Network`` is False on a version mismatch, and
+        # CPython's mapped handling covers is_private but not 100.64.0.0/10.
+        "::ffff:100.64.0.1",
+        "::ffff:6440:1",              # same address, hex spelling
+        "0:0:0:0:0:ffff:100.64.0.1",  # same address, expanded
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:10.0.0.1",
     ],
 )
 def test_webhook_ssrf_rejects_forbidden_ip(monkeypatch, tmp_path, ip):
@@ -288,3 +297,18 @@ def test_webhook_ssrf_rejects_unresolvable_hostname(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
     with pytest.raises(ConfigError, match="does not resolve"):
         load_config()
+
+
+def test_webhook_ssrf_accepts_a_mapped_public_ip(monkeypatch, tmp_path):
+    """Unwrapping mapped addresses must not over-block legitimate targets."""
+    monkeypatch.setenv("TEST_SECRET", "s")
+    monkeypatch.setenv("K", "k")
+    monkeypatch.setattr(
+        cfg_module, "_resolve_hostname", lambda host: ["::ffff:93.184.216.34"]
+    )
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, _webhook_cfg("https://hooks.example.com/inbox"))
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+    assert load_config()["delivery"]["operator"]["webhook"]["url"] == (
+        "https://hooks.example.com/inbox"
+    )

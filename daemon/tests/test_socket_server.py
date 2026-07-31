@@ -2,8 +2,6 @@
 
 import asyncio
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -92,7 +90,7 @@ async def test_subscribed_adapter_tracked(server, sock_dir):
     await _write_frame(writer, _hello_frame())
     await _read_frame(reader)
     assert len(server.connections) == 1
-    conn = list(server.connections.values())[0]
+    conn = next(iter(server.connections.values()))
     assert conn.adapter == "claude"
     assert conn.sources == ["github-actions"]
     writer.close()

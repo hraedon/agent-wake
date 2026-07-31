@@ -24,7 +24,6 @@ import json
 import os
 import shutil
 import socket
-import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -36,10 +35,8 @@ try:
 except Exception:
     _VERSION = "0.1.0"
 
-from .config import DEFAULT_CONFIG_PATH, load_config
-from .config import ConfigError
 from . import suite_config
-
+from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
 
 # ── check helpers ─────────────────────────────────────────────────────────────
 
@@ -80,7 +77,7 @@ def _check_ingress_reachable() -> tuple[str, str]:
     try:
         with socket.create_connection((host, port), timeout=2.0):
             pass
-    except (ConnectionRefusedError, OSError, socket.timeout):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return "warn", f"daemon not reachable at {host}:{port} (may not be running)"
 
     try:
@@ -227,22 +224,48 @@ def _check_delivery_health() -> tuple[str, str]:
                     if isinstance(delivery_status, dict):
                         failing = delivery_status.get("failing_channels", [])
                         unknown = delivery_status.get("unknown_principals", [])
+                        lost = delivery_status.get("lost_alerts") or 0
+                        # A lost alert is a *fail*, not a warn: an alert that
+                        # could not even be dead-lettered is gone, and the only
+                        # other trace of it is one ERROR line in the daemon log.
+                        if lost:
+                            last = delivery_status.get("last_lost_alert") or "?"
+                            return "fail", (
+                                f"{lost} human alert(s) could not be dead-lettered "
+                                f"and are permanently lost (most recent: {last}) — "
+                                "the durable store was unavailable; grep the daemon "
+                                "log for 'LOST ALERT'"
+                            )
                         parts: list[str] = []
                         if failing:
                             chans = ", ".join(
                                 f"{f.get('channel', '?')}→{f.get('principal_id', '?')}"
                                 for f in failing
                             )
-                            parts.append(f"delivery channel failures: {chans} (see daemon logs for detail)")
+                            parts.append(
+                                f"delivery channel failures: {chans} "
+                                "(see daemon logs for detail)"
+                            )
                         if unknown:
-                            parts.append(f"events targeted unknown principals: {', '.join(unknown)}")
+                            parts.append(
+                                "events targeted unknown principals: "
+                                f"{', '.join(unknown)}"
+                            )
                         if parts:
                             return "warn", "; ".join(parts)
                         n = len(delivery)
                         return "ok", f"{n} principal(s), delivery healthy"
-        return "ok", f"{len(delivery)} delivery channel(s) configured (daemon health endpoint returned HTTP {resp.status})"
+        return (
+            "ok",
+            f"{len(delivery)} delivery channel(s) configured "
+            f"(daemon health endpoint returned HTTP {resp.status})",
+        )
     except Exception:
-        return "ok", f"{len(delivery)} delivery channel(s) configured (daemon not running; live health unchecked)"
+        return (
+            "ok",
+            f"{len(delivery)} delivery channel(s) configured "
+            "(daemon not running; live health unchecked)",
+        )
 
 
 def _check_regista() -> dict[str, Any] | None:

@@ -5,25 +5,39 @@ import json
 import pytest
 
 from agent_waked.proto import (
-    MAX_FRAME_SIZE,
-    BadFrameError,
-    FrameTooLargeError,
     decode_line,
     encode_frame,
     validate_frame,
 )
-
 
 # ── round-trip ────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("frame", [
     {"type": "hello", "v": 1, "adapter": "claude", "instance": "t", "filters": {"sources": ["x"]}},
     {"type": "hello_ack", "v": 1, "session_id": "01ABC", "accepted_sources": ["x"]},
-    {"type": "wake", "ack_id": "01DEF", "event": {"v": 0, "event_id": "e1", "source": "x", "kind": "webhook", "content": "hi", "meta": {}, "wake": True}},
+    {
+        "type": "wake",
+        "ack_id": "01DEF",
+        "event": {
+            "v": 0,
+            "event_id": "e1",
+            "source": "x",
+            "kind": "webhook",
+            "content": "hi",
+            "meta": {},
+            "wake": True,
+        },
+    },
     {"type": "ack", "ack_id": "01DEF"},
     {"type": "nack", "ack_id": "01DEF", "reason": "busy"},
     {"type": "reply", "reply_id": "01G", "source": "x", "in_reply_to": "01DEF", "content": "ok"},
-    {"type": "reply_result", "reply_id": "01G", "status": "delivered", "http_status": 200, "error": None},
+    {
+        "type": "reply_result",
+        "reply_id": "01G",
+        "status": "delivered",
+        "http_status": 200,
+        "error": None,
+    },
     {"type": "error", "code": "bad_frame", "message": "nope", "fatal": True},
 ])
 def test_round_trip(frame):
@@ -35,7 +49,13 @@ def test_round_trip(frame):
 
 
 def test_encode_is_utf8():
-    frame = {"type": "hello", "v": 1, "adapter": "claude", "instance": "t", "filters": {"sources": ["x"]}}
+    frame = {
+        "type": "hello",
+        "v": 1,
+        "adapter": "claude",
+        "instance": "t",
+        "filters": {"sources": ["x"]},
+    }
     encoded = encode_frame(frame)
     encoded.decode("utf-8")
 
@@ -48,12 +68,24 @@ def test_decode_malformed_json_raises():
 # ── validate_frame ────────────────────────────────────────────────────
 
 def test_validate_hello_valid():
-    f = {"type": "hello", "v": 1, "adapter": "claude", "instance": "t", "filters": {"sources": ["x"]}}
+    f = {
+        "type": "hello",
+        "v": 1,
+        "adapter": "claude",
+        "instance": "t",
+        "filters": {"sources": ["x"]},
+    }
     assert validate_frame(f) is None
 
 
 def test_validate_hello_bad_version():
-    f = {"type": "hello", "v": 99, "adapter": "claude", "instance": "t", "filters": {"sources": ["x"]}}
+    f = {
+        "type": "hello",
+        "v": 99,
+        "adapter": "claude",
+        "instance": "t",
+        "filters": {"sources": ["x"]},
+    }
     assert validate_frame(f) == "version_unsupported"
 
 
@@ -108,19 +140,32 @@ def test_validate_reply_missing_reply_id():
 
 
 def test_validate_reply_result_delivered():
-    assert validate_frame({"type": "reply_result", "reply_id": "01R", "status": "delivered"}) is None
+    assert validate_frame(
+        {"type": "reply_result", "reply_id": "01R", "status": "delivered"}
+    ) is None
 
 
 def test_validate_reply_result_failed():
-    assert validate_frame({"type": "reply_result", "reply_id": "01R", "status": "failed", "error": "timeout"}) is None
+    assert validate_frame(
+        {
+            "type": "reply_result",
+            "reply_id": "01R",
+            "status": "failed",
+            "error": "timeout",
+        }
+    ) is None
 
 
 def test_validate_reply_result_no_callback():
-    assert validate_frame({"type": "reply_result", "reply_id": "01R", "status": "no_callback"}) is None
+    assert validate_frame(
+        {"type": "reply_result", "reply_id": "01R", "status": "no_callback"}
+    ) is None
 
 
 def test_validate_reply_result_bad_status():
-    assert validate_frame({"type": "reply_result", "reply_id": "01R", "status": "pending"}) == "bad_frame"
+    assert validate_frame(
+        {"type": "reply_result", "reply_id": "01R", "status": "pending"}
+    ) == "bad_frame"
 
 
 def test_validate_error_valid():
@@ -148,7 +193,9 @@ def test_validate_type_not_string_returns_bad_frame():
 
 
 def test_validate_hello_ack_valid():
-    assert validate_frame({"type": "hello_ack", "v": 1, "session_id": "01A", "accepted_sources": []}) is None
+    assert validate_frame(
+        {"type": "hello_ack", "v": 1, "session_id": "01A", "accepted_sources": []}
+    ) is None
 
 
 def test_validate_hello_ack_missing_session_id():

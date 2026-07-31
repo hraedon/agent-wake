@@ -16,16 +16,16 @@
 # %ProgramData%\agent-suite\suite.env (system) or
 # %USERPROFILE%\.config\agent-suite\suite.env (per-user).
 
+import logging
 import os
 import sys
-import logging
 from pathlib import Path
 
 try:
-    import win32serviceutil
-    import win32service
-    import win32event
     import servicemanager
+    import win32event
+    import win32service
+    import win32serviceutil
 except ImportError:
     print("pywin32 is required: pip install -e '.[windows]'", file=sys.stderr)
     sys.exit(1)
@@ -53,14 +53,14 @@ class AgentWakedService(win32serviceutil.ServiceFramework):
             format="%(asctime)s %(name)s %(levelname)s %(message)s",
         )
 
-    def SvcStop(self):
+    def SvcStop(self):  # noqa: N802
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         logging.info("service stop requested")
         if self._stop_event is not None:
             self._stop_event.set()
         win32event.SetEvent(self.hWaitStop)
 
-    def SvcDoRun(self):
+    def SvcDoRun(self):  # noqa: N802
         servicemanager.LogMsg(
             servicemanager.EVENTLOG_INFORMATION_TYPE,
             servicemanager.PYS_SERVICE_STARTED,

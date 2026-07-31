@@ -16,7 +16,6 @@ import json
 import os
 import secrets
 import signal
-import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -116,7 +115,7 @@ def _load_raw_config() -> dict[str, Any]:
             f"config file not found at {path}. "
             "Run 'agent-wake init' to create one (future feature)."
         )
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)  # type: ignore[no-any-return]
 
 
@@ -252,7 +251,7 @@ def _env_file_remove_line(var_name: str) -> None:
     if not path.exists():
         return
     lines = path.read_text(encoding="utf-8").splitlines()
-    new_lines = [l for l in lines if not l.strip().startswith(f"{var_name}=")]
+    new_lines = [line for line in lines if not line.strip().startswith(f"{var_name}=")]
     path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
@@ -279,7 +278,12 @@ def _summarize_sources(sources: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             backend = "unknown"
             uris = []
-        rows.append({"source": name, "backend": backend, "n_secrets": len(uris), "secret_uris": uris})
+        rows.append({
+            "source": name,
+            "backend": backend,
+            "n_secrets": len(uris),
+            "secret_uris": uris,
+        })
     return rows
 
 
@@ -338,7 +342,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         sources[source] = {"secret": f"env://{var_name}"}
         _save_raw_config(raw)
         print(f"Secret added for source {source!r}.")
-        print(f"  Backend : env")
+        print("  Backend : env")
         print(f"  Env var : {var_name}")
         print(f"  Env file: {_env_file_path()}")
         print()
@@ -374,7 +378,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
         sources[source] = {"secret": uri}
         _save_raw_config(raw)
         print(f"Secret added for source {source!r}.")
-        print(f"  Backend   : vault")
+        print("  Backend   : vault")
         print(f"  Vault path: {vault_path}")
         print(f"  Field     : {key}")
         print()
@@ -445,10 +449,14 @@ def _cmd_rotate(args: argparse.Namespace) -> int:
         return 1
 
     # Build new URI list: prepend new, keep at most one previous, trim to 2.
-    new_uris = [new_uri] + existing_uris[:1]
+    new_uris = [new_uri, *existing_uris[:1]]
 
     # Promote to list form in config.
-    sources[source] = {k: v for k, v in info.items() if k not in ("secret", "secret_env", "secrets")}
+    sources[source] = {
+        k: v
+        for k, v in info.items()
+        if k not in ("secret", "secret_env", "secrets")
+    }
     sources[source]["secrets"] = new_uris
 
     _save_raw_config(raw)

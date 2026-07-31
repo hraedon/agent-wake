@@ -89,7 +89,11 @@ def render_email(event: dict[str, Any]) -> tuple[str, str]:
     subject_tmpl = _SUBJECT_TEMPLATES.get(kind, _DEFAULT_SUBJECT)
     body_tmpl = _BODY_TEMPLATES.get(kind, _DEFAULT_BODY)
 
-    subject = subject_tmpl.format(content=content_short) if "{content}" in subject_tmpl else subject_tmpl
+    subject = (
+        subject_tmpl.format(content=content_short)
+        if "{content}" in subject_tmpl
+        else subject_tmpl
+    )
     body = body_tmpl.format(content=content, deep_link=deep_link or "(none)")
     return subject.strip(), body
 
@@ -108,7 +112,7 @@ class EmailChannel:
         self,
         event: dict[str, Any],
         channel_cfg: dict[str, Any],
-        resolver: "SecretResolver",
+        resolver: SecretResolver,
     ) -> dict[str, Any]:
         host = channel_cfg["smtp_host"]
         port = int(channel_cfg["smtp_port"])

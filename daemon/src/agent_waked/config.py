@@ -14,14 +14,14 @@ Output shape for each source:
   ``cfg["sources"][name]`` = ``{"secret_uris": [...], "callback_url": ...}``
 """
 
-import ipaddress
 import json
 import logging
 import os
-import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+from . import netguard
 
 log = logging.getLogger("agent_waked.config")
 
@@ -30,10 +30,6 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "agent-wake" / "config.json"
 _VALID_SCHEMES = {"env", "vault"}
 
 _VALID_CHANNEL_KINDS = {"webhook", "email"}
-
-# RFC 6598 shared address space (CGNAT) — is_private is False for this range,
-# so it must be checked explicitly to prevent SSRF via a CGNAT-internal target.
-_CGNAT_RANGE = ipaddress.ip_network("100.64.0.0/10")
 
 
 class ConfigError(Exception):
@@ -71,7 +67,7 @@ def load_config() -> dict[str, Any]:
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         try:
             raw = json.load(f)
         except json.JSONDecodeError as e:
@@ -100,7 +96,10 @@ def load_config() -> dict[str, Any]:
         raise ConfigError(f"Unsupported config version {version!r}. Only 0 and 1 are accepted.")
 
     if version == 0:
-        log.warning("config version 0 is deprecated; upgrade to version 1 and add a 'routing' block")
+        log.warning(
+            "config version 0 is deprecated; "
+            "upgrade to version 1 and add a 'routing' block"
+        )
 
     listen = raw.get("listen", {})
     routing = raw.get("routing", {})
@@ -210,11 +209,33 @@ def load_config() -> dict[str, Any]:
                         f"'allowed_target_principals' must be a non-empty string."
                     )
 
+        # A bare string here would silently become a *substring* allowlist:
+        # gating.check_trigger_identity does ``header not in allowed``, so
+        # "alice" as a string admits the sender "ali". Reject the shape at
+        # load rather than weakening authentication at request time.
+        allowed_identities = info.get("allowed_trigger_identities")
+        if allowed_identities is not None:
+            if not isinstance(allowed_identities, list):
+                raise ConfigError(
+                    f"Source {name!r}: 'allowed_trigger_identities' must be a "
+                    f"list of principal_id strings (got "
+                    f"{type(allowed_identities).__name__}). A bare string "
+                    f"would match any sender whose identity is a substring "
+                    f"of it."
+                )
+            for ident in allowed_identities:
+                if not isinstance(ident, str) or not ident:
+                    raise ConfigError(
+                        f"Source {name!r}: each entry in "
+                        f"'allowed_trigger_identities' must be a non-empty "
+                        f"string."
+                    )
+
         cfg["sources"][name] = {
             "secret_uris": secret_uris,
             "callback_url": info.get("callback_url") or cfg["default_callback_url"],
             "principal_id": info.get("principal_id"),
-            "allowed_trigger_identities": info.get("allowed_trigger_identities"),
+            "allowed_trigger_identities": allowed_identities,
             "allowed_target_principals": allowed_targets,
         }
 
@@ -252,6 +273,8 @@ _STATE_INT_FIELDS = (
     "pending_ttl_seconds",
     "pending_max_rows",
     "pending_max_attempts",
+    "dead_letter_ttl_seconds",
+    "dead_letter_max_rows",
 )
 
 
@@ -372,11 +395,11 @@ def _validate_channel(
 def _resolve_hostname(host: str) -> list[str]:
     """Resolve a hostname to its IP address strings.
 
-    Module-level so tests can monkeypatch DNS (the offline sandbox has no
-    resolver). Returns the list of resolved address strings.
+    Kept as a module-level indirection so tests can monkeypatch DNS (the
+    offline sandbox has no resolver). Returns the list of resolved address
+    strings.
     """
-    infos = socket.getaddrinfo(host, None)
-    return [str(info[4][0]) for info in infos]
+    return netguard.resolve_hostname(host)
 
 
 def _assert_safe_webhook_url(url: str, pid: str) -> None:
@@ -388,6 +411,12 @@ def _assert_safe_webhook_url(url: str, pid: str) -> None:
     resolved and every resolved address is checked against forbidden ranges.
     An unresolvable hostname is rejected (the webhook would be unusable and
     could mask a rebinding attack).
+
+    This runs at **config load only**. It is a fail-fast check on operator
+    input, not the delivery-time guard: a hostname can be re-pointed at an
+    internal address after the daemon has started. ``WebhookChannel.deliver``
+    re-runs the same range predicate (``netguard.acheck_url``) before every
+    POST, which is where rebinding is actually mitigated.
     """
     try:
         parsed = urlparse(url)
@@ -406,25 +435,13 @@ def _assert_safe_webhook_url(url: str, pid: str) -> None:
         raise ConfigError(
             f"Principal {pid!r} webhook: hostname {host!r} resolved to no addresses."
         )
-    for addr in addrs:
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-            or ip in _CGNAT_RANGE
-        ):
-            raise ConfigError(
-                f"Principal {pid!r} webhook: URL hostname {host!r} resolves to a "
-                f"forbidden address {addr} (loopback/private/reserved). Outbound "
-                f"webhooks must target a public host."
-            )
+    bad = netguard.forbidden_address(addrs)
+    if bad is not None:
+        raise ConfigError(
+            f"Principal {pid!r} webhook: URL hostname {host!r} resolves to a "
+            f"forbidden address {bad} (loopback/private/reserved). Outbound "
+            f"webhooks must target a public host."
+        )
 
 
 def _validate_webhook_channel(cfg: dict[str, Any], pid: str) -> dict[str, Any]:
@@ -461,7 +478,7 @@ def _validate_email_channel(cfg: dict[str, Any], pid: str) -> dict[str, Any]:
     port = cfg.get("smtp_port", 587)
     if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
         raise ConfigError(
-            f"Principal {pid!r} email: 'smtp_port' must be an integer 1–65535."
+            f"Principal {pid!r} email: 'smtp_port' must be an integer 1-65535."
         )
     result["smtp_port"] = port
 

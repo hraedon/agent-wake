@@ -27,6 +27,9 @@ jobs:
       - name: Run mypy
         run: mypy src/
         working-directory: daemon
+      - name: Run ruff
+        run: ruff check .
+        working-directory: daemon
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
         working-directory: daemon

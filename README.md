@@ -173,6 +173,22 @@ single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
 - A replayed `event_id` is rejected **across daemon restarts**, not just within
   one process lifetime.
 - A reply whose callback permanently fails is dead-lettered and can be resent.
+- A human-directed alert that never reached its principal is dead-lettered too
+  (`kind=human_delivery`), including one cut short by a daemon restart, and can
+  be re-dispatched with `dead-letter redrive`.
+- The dead-letter table is bounded like the others. Entries hold full event
+  bodies, so they expire after `dead_letter_ttl_seconds` and are capped at
+  `dead_letter_max_rows`. Losing an entry nobody redrove is logged as a warning
+  on **both** paths — expiry and cap eviction.
+- When the cap bites, eviction ranks on operator value, not age: already-redriven
+  entries first, then `next_session` (a re-queueable event that already sat
+  unclaimed for its whole TTL), then `reply`, then `human_delivery` last. Keep
+  `dead_letter_max_rows` above `pending_max_rows` — one `prune` promotes every
+  expired queue entry into this table at once, so a smaller cap lets a queue
+  expiry burst evict unrelated human alerts.
+- Redriving a *partial* delivery only retries the channels that failed. The
+  outbound webhook carries an `Idempotency-Key`, but email carries no
+  idempotency token, so replaying everything would mean a second real email.
 
 ```jsonc
 // config.json
@@ -184,7 +200,9 @@ single SQLite file (default `~/.local/state/agent-wake/state.db`, override with
   "dedupe_max_rows": 100000,
   "pending_ttl_seconds": 604800,
   "pending_max_rows": 10000,
-  "pending_max_attempts": 5
+  "pending_max_attempts": 5,
+  "dead_letter_ttl_seconds": 2592000,
+  "dead_letter_max_rows": 20000       // keep above pending_max_rows
 }
 ```
 
@@ -195,7 +213,9 @@ agent-wake pending list                  # what is queued for the next session
 agent-wake pending prune                 # apply retention now
 agent-wake dead-letter list              # what failed permanently, and why
 agent-wake dead-letter show <id>         # the full payload
-agent-wake dead-letter redrive <id>      # resend it (replies) / requeue it (events)
+agent-wake dead-letter list --kind human_delivery   # undelivered human alerts
+agent-wake dead-letter redrive <id>      # resend it (replies, human alerts) /
+                                         # requeue it (next-session events)
 agent-wake dead-letter purge --older-than-days 30
 ```
 
