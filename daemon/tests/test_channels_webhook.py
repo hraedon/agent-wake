@@ -16,6 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from agent_waked import netguard
 from agent_waked.channels.webhook import WebhookChannel, _redact_url
 
 
@@ -176,6 +177,171 @@ async def test_webhook_idempotency_key_matches_event_id():
         assert received_keys == ["evt-AAA", "evt-BBB"]
     finally:
         await cli.close()
+
+
+# ── SSRF: redirects are not followed ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_webhook_does_not_follow_redirects():
+    """A 3xx must not re-POST the signed body to the redirect target.
+
+    Without ``allow_redirects=False`` a hijacked-but-valid target can 301 the
+    body anywhere — including an internal address nothing validates.
+    """
+    internal_hits = []
+
+    async def hook(request):
+        raise web.HTTPFound(location="/internal")
+
+    async def internal(request):
+        internal_hits.append(await request.read())
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/hook", hook)
+    app.router.add_post("/internal", internal)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        url = str(cli.make_url("/hook"))
+        resolver = FakeResolver({"env://WEBHOOK_SECRET": b"secret"})
+        ch = WebhookChannel(max_retries=1)
+        result = await ch.deliver(_event(), _config(url), resolver)
+        await ch.close()
+
+        assert internal_hits == []
+        assert result["status"] == "failed"
+        assert result["http_status"] == 302
+    finally:
+        await cli.close()
+
+
+# ── SSRF: the forbidden-range guard runs per request, not just at load ──
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_target_that_rebinds_to_internal(monkeypatch):
+    """A hostname re-pointed at an internal address after load is refused.
+
+    This is the DNS-rebinding case the config-load check cannot see: the URL
+    was valid when the daemon started, and resolves to 169.254.169.254 now.
+    """
+    hits = []
+
+    async def handler(request):
+        hits.append(await request.read())
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        async def _rebound(host: str) -> list[str]:
+            return ["169.254.169.254"]
+
+        monkeypatch.setattr(netguard, "aresolve_hostname", _rebound)
+
+        url = str(cli.make_url("/hook"))
+        resolver = FakeResolver({"env://WEBHOOK_SECRET": b"secret"})
+        ch = WebhookChannel(max_retries=3, backoff_delays=(0.01, 0.01, 0.01))
+        result = await ch.deliver(_event(), _config(url), resolver)
+        await ch.close()
+
+        assert result["status"] == "failed"
+        assert "unsafe target" in result["error"]
+        assert "169.254.169.254" in result["error"]
+        # Nothing was sent, and no retry ladder was walked for an unsafe URL.
+        assert hits == []
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_unresolvable_target(monkeypatch):
+    async def _fail(host: str) -> list[str]:
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(netguard, "aresolve_hostname", _fail)
+    resolver = FakeResolver({"env://WEBHOOK_SECRET": b"secret"})
+    ch = WebhookChannel(max_retries=1)
+    result = await ch.deliver(_event(), _config("https://gone.example/hook"), resolver)
+    await ch.close()
+
+    assert result["status"] == "failed"
+    assert "does not resolve" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_non_http_scheme():
+    resolver = FakeResolver({"env://WEBHOOK_SECRET": b"secret"})
+    ch = WebhookChannel(max_retries=1)
+    result = await ch.deliver(_event(), _config("file:///etc/passwd"), resolver)
+    await ch.close()
+
+    assert result["status"] == "failed"
+    assert "disallowed scheme" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_unsafe_target_never_computes_a_signature(monkeypatch):
+    """The guard runs before secret resolution, so no signature is minted."""
+    resolved = []
+
+    class TrackingResolver(FakeResolver):
+        async def resolve(self, uri: str) -> bytes:
+            resolved.append(uri)
+            return await super().resolve(uri)
+
+    async def _rebound(host: str) -> list[str]:
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(netguard, "aresolve_hostname", _rebound)
+    ch = WebhookChannel(max_retries=1)
+    result = await ch.deliver(
+        _event(), _config("https://hook.example/x"),
+        TrackingResolver({"env://WEBHOOK_SECRET": b"secret"}),
+    )
+    await ch.close()
+
+    assert result["status"] == "failed"
+    assert resolved == []
+
+
+# ── netguard range predicate ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "127.0.0.1",
+        "10.0.0.5",
+        "192.168.1.1",
+        "172.16.0.1",
+        "169.254.169.254",  # cloud metadata
+        "100.64.0.1",  # RFC 6598 CGNAT — is_private is False for this range
+        "0.0.0.0",
+        "224.0.0.1",
+        "::1",
+        "fe80::1",
+    ],
+)
+def test_netguard_rejects_forbidden_addresses(addr):
+    assert netguard.is_forbidden_address(addr) is True
+
+
+@pytest.mark.parametrize("addr", ["93.184.216.34", "8.8.8.8", "2606:2800:220:1::1"])
+def test_netguard_allows_public_addresses(addr):
+    assert netguard.is_forbidden_address(addr) is False
+
+
+def test_netguard_ignores_unparseable_address():
+    """Garbage from the resolver is not silently treated as forbidden."""
+    assert netguard.is_forbidden_address("not-an-ip") is False
+    assert netguard.forbidden_address(["not-an-ip", "10.0.0.1"]) == "10.0.0.1"
 
 
 # ── _redact_url ───────────────────────────────────────────────────────

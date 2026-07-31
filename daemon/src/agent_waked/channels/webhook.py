@@ -10,6 +10,26 @@ secret — the same scheme the daemon uses for inbound ingest, so a receiver
 that already knows how to verify agent-wake webhooks can verify these too.
 The event_id is sent as an ``Idempotency-Key`` header so the receiver can
 deduplicate retries (at-least-once delivery, Plan 005 principle).
+
+SSRF posture
+------------
+Redirects are not followed (``allow_redirects=False``): a hijacked-but-valid
+target could otherwise 301 the signed body to an internal address, and the
+redirect target is never validated by anyone.
+
+The forbidden-range check (``netguard.acheck_url``) runs once per ``deliver``
+call, immediately before the first POST, in addition to the config-load check
+in ``config._assert_safe_webhook_url``. That is what mitigates DNS rebinding:
+without it the only validation happened at daemon start and a hostname
+re-pointed at ``169.254.169.254`` afterwards was delivered to for the rest of
+the process lifetime.
+
+What remains open, deliberately: this is check-then-connect. We resolve, we
+approve, then aiohttp resolves again for the actual connection and can get a
+different answer. Closing that means pinning the socket to the address we
+validated — a custom ``TCPConnector``/resolver that also has to keep TLS SNI
+and the Host header pointing at the original hostname. That is a larger change
+than this fix, and the residual window is microseconds rather than hours.
 """
 
 from __future__ import annotations
@@ -23,6 +43,8 @@ import time
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
+
+from .. import netguard
 
 if False:  # TYPE_CHECKING
     from ..secrets.resolver import SecretResolver
@@ -63,6 +85,21 @@ class WebhookChannel:
     ) -> dict[str, Any]:
         url = channel_cfg["url"]
         secret_uri = channel_cfg["secret_uri"]
+        event_id_for_log = str(event.get("event_id", ""))
+
+        # Re-validate the target on the request path, not just at config load:
+        # the hostname may have been re-pointed at an internal address since
+        # the daemon started (DNS rebinding). Do this before resolving the
+        # secret so a rebound target never even sees a signature computed.
+        url_err = await netguard.acheck_url(url)
+        if url_err is not None:
+            log.error(
+                "webhook rejected url=%s event_id=%s error=%s",
+                _redact_url(url),
+                event_id_for_log,
+                url_err,
+            )
+            return {"status": "failed", "error": f"unsafe target: {url_err}"}
 
         try:
             secret = await resolver.resolve(secret_uri)

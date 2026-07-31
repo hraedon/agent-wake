@@ -14,14 +14,14 @@ Output shape for each source:
   ``cfg["sources"][name]`` = ``{"secret_uris": [...], "callback_url": ...}``
 """
 
-import ipaddress
 import json
 import logging
 import os
-import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+from . import netguard
 
 log = logging.getLogger("agent_waked.config")
 
@@ -30,10 +30,6 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "agent-wake" / "config.json"
 _VALID_SCHEMES = {"env", "vault"}
 
 _VALID_CHANNEL_KINDS = {"webhook", "email"}
-
-# RFC 6598 shared address space (CGNAT) — is_private is False for this range,
-# so it must be checked explicitly to prevent SSRF via a CGNAT-internal target.
-_CGNAT_RANGE = ipaddress.ip_network("100.64.0.0/10")
 
 
 class ConfigError(Exception):
@@ -375,11 +371,11 @@ def _validate_channel(
 def _resolve_hostname(host: str) -> list[str]:
     """Resolve a hostname to its IP address strings.
 
-    Module-level so tests can monkeypatch DNS (the offline sandbox has no
-    resolver). Returns the list of resolved address strings.
+    Kept as a module-level indirection so tests can monkeypatch DNS (the
+    offline sandbox has no resolver). Returns the list of resolved address
+    strings.
     """
-    infos = socket.getaddrinfo(host, None)
-    return [str(info[4][0]) for info in infos]
+    return netguard.resolve_hostname(host)
 
 
 def _assert_safe_webhook_url(url: str, pid: str) -> None:
@@ -391,6 +387,12 @@ def _assert_safe_webhook_url(url: str, pid: str) -> None:
     resolved and every resolved address is checked against forbidden ranges.
     An unresolvable hostname is rejected (the webhook would be unusable and
     could mask a rebinding attack).
+
+    This runs at **config load only**. It is a fail-fast check on operator
+    input, not the delivery-time guard: a hostname can be re-pointed at an
+    internal address after the daemon has started. ``WebhookChannel.deliver``
+    re-runs the same range predicate (``netguard.acheck_url``) before every
+    POST, which is where rebinding is actually mitigated.
     """
     try:
         parsed = urlparse(url)
@@ -409,25 +411,13 @@ def _assert_safe_webhook_url(url: str, pid: str) -> None:
         raise ConfigError(
             f"Principal {pid!r} webhook: hostname {host!r} resolved to no addresses."
         )
-    for addr in addrs:
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-            or ip in _CGNAT_RANGE
-        ):
-            raise ConfigError(
-                f"Principal {pid!r} webhook: URL hostname {host!r} resolves to a "
-                f"forbidden address {addr} (loopback/private/reserved). Outbound "
-                f"webhooks must target a public host."
-            )
+    bad = netguard.forbidden_address(addrs)
+    if bad is not None:
+        raise ConfigError(
+            f"Principal {pid!r} webhook: URL hostname {host!r} resolves to a "
+            f"forbidden address {bad} (loopback/private/reserved). Outbound "
+            f"webhooks must target a public host."
+        )
 
 
 def _validate_webhook_channel(cfg: dict[str, Any], pid: str) -> dict[str, Any]:

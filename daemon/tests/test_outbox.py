@@ -403,3 +403,45 @@ async def test_outbox_without_store_keeps_v0_shape():
     await ob.close()
     assert result["status"] == "rejected"
     assert "dead_letter_id" not in result
+
+
+# ── SSRF: redirects are not followed ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reply_does_not_follow_redirects():
+    """A 3xx from the callback must not re-POST the reply body elsewhere.
+
+    Callback URLs are operator-configured, but "valid target that got
+    hijacked" is exactly the case a redirect amplifies: the second POST
+    target is validated by nobody.
+    """
+    internal_hits = []
+
+    async def cb(request):
+        raise web.HTTPMovedPermanently(location="/internal")
+
+    async def internal(request):
+        internal_hits.append(await request.read())
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/cb", cb)
+    app.router.add_post("/internal", internal)
+    server = TestServer(app)
+    cli = TestClient(server)
+    await cli.start_server()
+    try:
+        url = str(cli.make_url("/cb"))
+        ob = Outbox(_config(callback_url=url), max_retries=1)
+        await ob.start()
+        result = await ob.deliver(
+            source="github-actions", reply_id="r1", in_reply_to="e1", content="x"
+        )
+        await ob.close()
+
+        assert internal_hits == []
+        assert result["status"] == "failed"
+        assert result["http_status"] == 301
+    finally:
+        await cli.close()
