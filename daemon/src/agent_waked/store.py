@@ -262,8 +262,11 @@ class WakeStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             prior = self._read_schema_version()
-            self._conn.executescript(_SCHEMA)
+            # Migrate *before* the schema script, not after: ``_SCHEMA`` creates
+            # ``idx_pending_destination``, and an index on a column an existing
+            # v1 table does not have yet fails the whole open.
             self._migrate(prior)
+            self._conn.executescript(_SCHEMA)
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -321,6 +324,10 @@ class WakeStore:
             str(r["name"])
             for r in self._conn.execute("PRAGMA table_info(pending)").fetchall()
         }
+        if not cols:
+            # Version recorded but no table: nothing to migrate, ``_SCHEMA``
+            # will create it fresh.
+            return
         if "destination" not in cols:
             log.info(
                 "migrating state db %s from schema v%d to v%d "
@@ -330,10 +337,6 @@ class WakeStore:
                 SCHEMA_VERSION,
             )
             self._conn.execute("ALTER TABLE pending ADD COLUMN destination TEXT")
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_pending_destination "
-                "ON pending(destination)"
-            )
         cur = self._conn.execute(
             "UPDATE pending SET destination = source WHERE destination IS NULL"
         )
