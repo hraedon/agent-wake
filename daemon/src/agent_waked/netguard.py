@@ -33,11 +33,24 @@ def is_forbidden_address(addr: str) -> bool:
 
     An address that does not parse as an IP is not forbidden here — the
     caller decides what to do with garbage from the resolver.
+
+    IPv4-mapped IPv6 forms (``::ffff:100.64.0.1``, and its equally valid
+    spellings ``::ffff:6440:1`` and ``0:0:0:0:0:ffff:100.64.0.1``) are unwrapped
+    to the v4 address before the range tests. This is not hygiene, it was a live
+    bypass: ``ip in CGNAT_RANGE`` compares an ``IPv6Address`` against an
+    ``IPv4Network``, and ``_BaseNetwork.__contains__`` returns False on a
+    version mismatch rather than raising. CPython's own mapped-address handling
+    rescued ``is_private`` (so ``::ffff:127.0.0.1`` and
+    ``::ffff:169.254.169.254`` were correctly refused) but not CGNAT, because
+    100.64.0.0/10 is not in ``_private_networks``. The mapped form is a routable
+    alias — the connection lands on 100.64.0.1 all the same.
     """
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return bool(
         ip.is_loopback
         or ip.is_private

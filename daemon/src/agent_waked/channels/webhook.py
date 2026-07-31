@@ -17,19 +17,26 @@ Redirects are not followed (``allow_redirects=False``): a hijacked-but-valid
 target could otherwise 301 the signed body to an internal address, and the
 redirect target is never validated by anyone.
 
-The forbidden-range check (``netguard.acheck_url``) runs once per ``deliver``
-call, immediately before the first POST, in addition to the config-load check
-in ``config._assert_safe_webhook_url``. That is what mitigates DNS rebinding:
-without it the only validation happened at daemon start and a hostname
-re-pointed at ``169.254.169.254`` afterwards was delivered to for the rest of
-the process lifetime.
+The forbidden-range check (``netguard.acheck_url``) runs **before every attempt**
+in the retry loop, plus once as a pre-flight before the secret is resolved, in
+addition to the config-load check in ``config._assert_safe_webhook_url``. That is
+what mitigates DNS rebinding: without it the only validation happened at daemon
+start and a hostname re-pointed at ``169.254.169.254`` afterwards was delivered
+to for the rest of the process lifetime.
+
+Per attempt matters and once per ``deliver`` was not enough: attempt 3 can fire
+roughly 65 seconds after the first validation (30s request timeout + 1s backoff
++ 30s + 4s), and aiohttp resolves afresh for each connection. A single check at
+the top of ``deliver`` left attempts 2 and 3 guarded by a minute-old answer.
 
 What remains open, deliberately: this is check-then-connect. We resolve, we
 approve, then aiohttp resolves again for the actual connection and can get a
 different answer. Closing that means pinning the socket to the address we
 validated — a custom ``TCPConnector``/resolver that also has to keep TLS SNI
 and the Host header pointing at the original hostname. That is a larger change
-than this fix, and the residual window is microseconds rather than hours.
+than this fix. The residual window is now the gap between our resolution and
+aiohttp's, on every attempt — sub-millisecond in the normal case — rather than
+the whole process lifetime, or a whole retry ladder.
 """
 
 from __future__ import annotations
@@ -87,10 +94,11 @@ class WebhookChannel:
         secret_uri = channel_cfg["secret_uri"]
         event_id_for_log = str(event.get("event_id", ""))
 
-        # Re-validate the target on the request path, not just at config load:
-        # the hostname may have been re-pointed at an internal address since
-        # the daemon started (DNS rebinding). Do this before resolving the
-        # secret so a rebound target never even sees a signature computed.
+        # Pre-flight, before the secret is resolved, so a rebound target never
+        # sees a signature computed over the body. The authoritative check is
+        # the per-attempt one inside the retry loop below; this one exists for
+        # its ordering relative to secret resolution, and the duplicated lookup
+        # on attempt 1 is a deliberate price for that.
         url_err = await netguard.acheck_url(url)
         if url_err is not None:
             log.error(
@@ -122,6 +130,23 @@ class WebhookChannel:
         last_http_status: int | None = None
 
         for attempt in range(self._max_retries):
+            # Per attempt, not once per deliver(): attempt 3 can fire ~65s after
+            # attempt 1 (30s timeout + 1s backoff + 30s timeout + 4s backoff),
+            # and aiohttp re-resolves for every connection. Validating only once
+            # would leave the later attempts guarded by a stale answer — the same
+            # stale-answer bug as the config-load-only check, just on a shorter
+            # clock. One extra getaddrinfo per attempt, capped at _max_retries.
+            url_err = await netguard.acheck_url(url)
+            if url_err is not None:
+                log.error(
+                    "webhook rejected url=%s event_id=%s attempt=%d error=%s",
+                    _redact_url(url),
+                    event_id_for_log,
+                    attempt + 1,
+                    url_err,
+                )
+                return {"status": "failed", "error": f"unsafe target: {url_err}"}
+
             t0 = time.monotonic()
             try:
                 async with session.post(

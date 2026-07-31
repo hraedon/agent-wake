@@ -327,15 +327,57 @@ async def test_webhook_unsafe_target_never_computes_a_signature(monkeypatch):
         "224.0.0.1",
         "::1",
         "fe80::1",
+        "64:ff9b::",  # NAT64
+        "2002:7f00:1::",  # 6to4 wrapping 127.0.0.1
+        "::127.0.0.1",
+        # IPv4-mapped forms. These were a live bypass for CGNAT specifically:
+        # ``IPv6Address in IPv4Network`` is False on version mismatch, and
+        # CPython's mapped handling covers is_private but not 100.64.0.0/10.
+        # All three spellings resolve to the same routable v4 address.
+        "::ffff:100.64.0.1",
+        "::ffff:6440:1",
+        "0:0:0:0:0:ffff:100.64.0.1",
+        "::ffff:127.0.0.1",
+        "::ffff:7f00:1",
+        "::ffff:169.254.169.254",
+        "::ffff:10.0.0.1",
+        "::ffff:192.168.1.1",
     ],
 )
 def test_netguard_rejects_forbidden_addresses(addr):
     assert netguard.is_forbidden_address(addr) is True
 
 
-@pytest.mark.parametrize("addr", ["93.184.216.34", "8.8.8.8", "2606:2800:220:1::1"])
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "93.184.216.34",
+        "8.8.8.8",
+        "2606:2800:220:1::1",
+        # Unwrapping must not over-block: a mapped *public* address is fine.
+        "::ffff:93.184.216.34",
+        "::ffff:808:808",
+    ],
+)
 def test_netguard_allows_public_addresses(addr):
     assert netguard.is_forbidden_address(addr) is False
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_a_mapped_cgnat_target(monkeypatch):
+    """End to end at the delivery path, not just the predicate."""
+    async def _mapped_cgnat(host: str) -> list[str]:
+        return ["::ffff:100.64.0.1"]
+
+    monkeypatch.setattr(netguard, "aresolve_hostname", _mapped_cgnat)
+    ch = WebhookChannel(max_retries=1)
+    result = await ch.deliver(
+        _event(), _config("https://hook.example/x"),
+        FakeResolver({"env://WEBHOOK_SECRET": b"secret"}),
+    )
+    await ch.close()
+    assert result["status"] == "failed"
+    assert "unsafe target" in result["error"]
 
 
 def test_netguard_ignores_unparseable_address():
@@ -357,3 +399,73 @@ def test_redact_url_with_credentials():
     assert "pass" not in redacted
     assert "user" not in redacted
     assert "example.com/hook" in redacted
+
+
+@pytest.mark.asyncio
+async def test_webhook_revalidates_the_target_on_every_attempt(monkeypatch):
+    """Attempt 3 can fire ~65s after attempt 1; a stale approval is not enough."""
+    resolutions: list[str] = []
+
+    async def _counting(host: str) -> list[str]:
+        resolutions.append(host)
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netguard, "aresolve_hostname", _counting)
+
+    async def handler(request):
+        return web.Response(status=503)
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        url = str(cli.make_url("/hook"))
+        ch = WebhookChannel(max_retries=3, backoff_delays=(0.01, 0.01, 0.01))
+        result = await ch.deliver(
+            _event(), _config(url), FakeResolver({"env://WEBHOOK_SECRET": b"x"})
+        )
+        await ch.close()
+        assert result["status"] == "failed"
+        # One pre-flight (before the secret is resolved) + one per attempt.
+        assert len(resolutions) == 4, resolutions
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_webhook_stops_mid_ladder_when_the_target_rebinds(monkeypatch):
+    """A host that goes internal between attempts must not be posted to again."""
+    calls = {"n": 0}
+    hits: list[bytes] = []
+
+    async def _rebinding(host: str) -> list[str]:
+        calls["n"] += 1
+        # Public for the pre-flight and attempt 1, internal from attempt 2 on.
+        if calls["n"] <= 2:
+            return ["93.184.216.34"]
+        return ["169.254.169.254"]
+
+    monkeypatch.setattr(netguard, "aresolve_hostname", _rebinding)
+
+    async def handler(request):
+        hits.append(await request.read())
+        return web.Response(status=503)
+
+    app = web.Application()
+    app.router.add_post("/hook", handler)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        url = str(cli.make_url("/hook"))
+        ch = WebhookChannel(max_retries=3, backoff_delays=(0.01, 0.01, 0.01))
+        result = await ch.deliver(
+            _event(), _config(url), FakeResolver({"env://WEBHOOK_SECRET": b"x"})
+        )
+        await ch.close()
+        assert result["status"] == "failed"
+        assert "unsafe target" in result["error"]
+        # Attempt 1 went out; attempts 2 and 3 were refused, not delivered.
+        assert len(hits) == 1
+    finally:
+        await cli.close()
