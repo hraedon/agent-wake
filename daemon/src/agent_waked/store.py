@@ -63,7 +63,7 @@ from ulid import ULID
 
 log = logging.getLogger("agent_waked.store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_DEDUPE_TTL_SECONDS = 7 * 24 * 3600
 DEFAULT_DEDUPE_MAX_ROWS = 100_000
@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS pending (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id    TEXT NOT NULL UNIQUE,
     source      TEXT NOT NULL,
+    destination TEXT,
     target      TEXT,
     event_json  TEXT NOT NULL,
     enqueued_at REAL NOT NULL,
@@ -118,6 +119,7 @@ CREATE TABLE IF NOT EXISTS pending (
     attempts    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pending_source ON pending(source);
+CREATE INDEX IF NOT EXISTS idx_pending_destination ON pending(destination);
 CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending(expires_at);
 
 CREATE TABLE IF NOT EXISTS dead_letter (
@@ -142,11 +144,21 @@ class StoreError(Exception):
 
 @dataclass(frozen=True)
 class PendingEvent:
-    """One queued next-session event."""
+    """One queued next-session event.
+
+    ``destination`` is the addressee the row is reserved for (WI-006).  Keyed on
+    ``source`` alone, a drain handed every queued event for a sender to whichever
+    session connected first — the BC-001 fan-out with a delay in front of it, and
+    the reason BC-WAKE-012 asked for a *session-scoped* inbox rather than just a
+    durable one.  Nullable so rows written by an older build still drain: the
+    schema migration backfills them from ``source``, which is correct because the
+    legacy translation makes a source name and its destination name identical.
+    """
 
     row_id: int
     event_id: str
     source: str
+    destination: str | None
     target: str | None
     event: dict[str, Any]
     enqueued_at: float
@@ -249,7 +261,9 @@ class WakeStore:
             # ``:memory:`` databases reject WAL; ignore the failure there.
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
+            prior = self._read_schema_version()
             self._conn.executescript(_SCHEMA)
+            self._migrate(prior)
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -265,6 +279,69 @@ class WakeStore:
                 pass
 
         self.prune()
+
+    # ── schema migration ─────────────────────────────────────────────────────
+
+    def _read_schema_version(self) -> int | None:
+        """The version recorded in an existing database, or None if new.
+
+        Read *before* ``_SCHEMA`` runs, because ``CREATE TABLE IF NOT EXISTS``
+        makes "the table exists" say nothing about which columns it has.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    def _migrate(self, prior: int | None) -> None:
+        """Bring an existing database up to ``SCHEMA_VERSION`` in place.
+
+        v1 → v2 (WI-006) adds ``pending.destination``.  ``CREATE TABLE IF NOT
+        EXISTS`` will not add a column to a table that already exists, so a
+        daemon upgraded on a live box would otherwise fail every enqueue with
+        ``no such column``.
+
+        Existing rows are backfilled from ``source``, and that is *correct*
+        rather than merely convenient: the addressing translation makes a v1
+        source name and its destination name the same string, so a row queued
+        before the upgrade already names its destination — it just spelled it
+        ``source``.
+        """
+        if prior is None or prior >= SCHEMA_VERSION:
+            return
+        cols = {
+            str(r["name"])
+            for r in self._conn.execute("PRAGMA table_info(pending)").fetchall()
+        }
+        if "destination" not in cols:
+            log.info(
+                "migrating state db %s from schema v%d to v%d "
+                "(pending.destination)",
+                self.path,
+                prior,
+                SCHEMA_VERSION,
+            )
+            self._conn.execute("ALTER TABLE pending ADD COLUMN destination TEXT")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_destination "
+                "ON pending(destination)"
+            )
+        cur = self._conn.execute(
+            "UPDATE pending SET destination = source WHERE destination IS NULL"
+        )
+        if cur.rowcount:
+            log.info(
+                "backfilled destination on %d queued event(s) from their source",
+                cur.rowcount,
+            )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -306,11 +383,24 @@ class WakeStore:
 
     # ── next-session queue ───────────────────────────────────────────────────
 
-    def enqueue_pending(self, event: dict[str, Any]) -> bool:
-        """Queue *event* for delivery at the next session for its source.
+    def enqueue_pending(
+        self, event: dict[str, Any], destination: str | None = None
+    ) -> bool:
+        """Queue *event* for delivery at the next session for its destination.
 
         Returns False if the event_id is already queued (the queue is
         idempotent on event_id, matching dedupe) or if the queue is full.
+
+        ``destination`` defaults to the event's ``source``, which is the correct
+        legacy answer — a v0/v1 source name *is* its destination name after the
+        addressing translation — so callers that predate WI-006 keep working.
+
+        Note the idempotency key is still ``event_id`` alone.  One event fanned
+        out to several destinations therefore takes at most one queue row: the
+        first destination with no live subscriber reserves it.  Making the key
+        ``(event_id, destination)`` would let one offline sibling multiply a
+        burst by the fan-out width, and the queue cap exists precisely to bound
+        that.
         """
         event_id = str(event.get("event_id", ""))
         if not event_id:
@@ -332,11 +422,13 @@ class WakeStore:
                 return False
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO pending "
-                "(event_id, source, target, event_json, enqueued_at, expires_at, attempts) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                "(event_id, source, destination, target, event_json, "
+                "enqueued_at, expires_at, attempts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
                 (
                     event_id,
                     source,
+                    destination if destination is not None else source,
                     target,
                     json.dumps(event, separators=(",", ":")),
                     now,
@@ -346,20 +438,27 @@ class WakeStore:
             self._conn.commit()
             return cur.rowcount == 1
 
-    def claim_pending(self, source: str, limit: int = 100) -> list[PendingEvent]:
-        """Return queued events for *source*, incrementing their attempt count.
+    def claim_pending(self, destination: str, limit: int = 100) -> list[PendingEvent]:
+        """Return queued events for *destination*, incrementing their attempts.
 
         Claimed rows stay in the table: they are removed by
         ``delete_pending`` once the adapter acks, so a crash between claim and
         ack redelivers rather than loses (at-least-once, per Plan 006 §5).
+
+        Matching is on ``destination`` **or** a legacy row whose ``destination``
+        is NULL and whose ``source`` matches.  The NULL arm covers a row written
+        by a pre-WI-006 daemon in a database the migration has since touched but
+        which was enqueued in between — belt to the backfill's braces, and it
+        costs one indexed OR.
         """
         now = time.time()
         out: list[PendingEvent] = []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM pending WHERE source = ? AND expires_at > ? "
-                "ORDER BY id ASC LIMIT ?",
-                (source, now, limit),
+                "SELECT * FROM pending WHERE "
+                "(destination = ? OR (destination IS NULL AND source = ?)) "
+                "AND expires_at > ? ORDER BY id ASC LIMIT ?",
+                (destination, destination, now, limit),
             ).fetchall()
             for row in rows:
                 self._conn.execute(
@@ -376,9 +475,22 @@ class WakeStore:
             self._conn.execute("DELETE FROM pending WHERE id = ?", (row_id,))
             self._conn.commit()
 
-    def list_pending(self, source: str | None = None, limit: int = 200) -> list[PendingEvent]:
+    def list_pending(
+        self,
+        source: str | None = None,
+        limit: int = 200,
+        destination: str | None = None,
+    ) -> list[PendingEvent]:
+        """Operator-facing listing. *destination* narrows to one addressee."""
         with self._lock:
-            if source:
+            if destination:
+                rows = self._conn.execute(
+                    "SELECT * FROM pending WHERE "
+                    "(destination = ? OR (destination IS NULL AND source = ?)) "
+                    "ORDER BY id ASC LIMIT ?",
+                    (destination, destination, limit),
+                ).fetchall()
+            elif source:
                 rows = self._conn.execute(
                     "SELECT * FROM pending WHERE source = ? ORDER BY id ASC LIMIT ?",
                     (source, limit),
@@ -662,10 +774,12 @@ def _entries(n: int) -> str:
 
 
 def _pending_from_row(row: sqlite3.Row, attempts_delta: int = 0) -> PendingEvent:
+    keys = row.keys()
     return PendingEvent(
         row_id=int(row["id"]),
         event_id=str(row["event_id"]),
         source=str(row["source"]),
+        destination=(row["destination"] if "destination" in keys else None),
         target=row["target"],
         event=json.loads(row["event_json"]),
         enqueued_at=float(row["enqueued_at"]),

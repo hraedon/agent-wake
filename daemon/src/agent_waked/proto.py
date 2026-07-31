@@ -53,6 +53,17 @@ def _require_str(frame: dict[str, Any], key: str) -> str | None:
 
 
 def _validate_hello(frame: dict[str, Any]) -> str | None:
+    """Validate a ``hello``.
+
+    v2 addressing (WI-006) lets an adapter claim **destinations** by name
+    instead of subscribing to source names.  Either spelling is accepted and at
+    least one must be present: a hello that claims nothing would occupy a
+    connection slot and never be routed anything, which reads as a hung adapter
+    rather than as the misconfiguration it is.
+
+    ``filters.sources`` remains valid on its own — the deployed Claude adapter
+    sends exactly that, and the daemon derives the destinations it implies.
+    """
     if frame.get("v") != 1:
         return "version_unsupported"
     err = _require_str(frame, "adapter")
@@ -62,10 +73,21 @@ def _validate_hello(frame: dict[str, Any]) -> str | None:
     if err:
         return err
     filters = frame.get("filters", {})
+    if not isinstance(filters, dict):
+        return "bad_frame"
     sources = filters.get("sources")
-    if not isinstance(sources, list):
+    destinations = frame.get("destinations")
+    if sources is not None and not isinstance(sources, list):
+        return "bad_frame"
+    if destinations is not None and not _is_str_list(destinations):
+        return "bad_frame"
+    if sources is None and destinations is None:
         return "bad_frame"
     return None
+
+
+def _is_str_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
 def _validate_hello_ack(frame: dict[str, Any]) -> str | None:
@@ -77,15 +99,32 @@ def _validate_hello_ack(frame: dict[str, Any]) -> str | None:
     accepted = frame.get("accepted_sources")
     if not isinstance(accepted, list):
         return "bad_frame"
+    accepted_dests = frame.get("accepted_destinations")
+    if accepted_dests is not None and not _is_str_list(accepted_dests):
+        return "bad_frame"
     return None
 
 
 def _validate_wake(frame: dict[str, Any]) -> str | None:
+    """Validate a ``wake``.
+
+    The optional ``destination`` block is what closes BC-001: it names the
+    destination this copy of the event is addressed to, including the *session*
+    when the destination is session-scoped, so a multi-session adapter no longer
+    has to broadcast for lack of an addressee.  Optional, because an adapter
+    that ignores it behaves exactly as it did before.
+    """
     err = _require_str(frame, "ack_id")
     if err:
         return err
     if not isinstance(frame.get("event"), dict):
         return "bad_frame"
+    dest = frame.get("destination")
+    if dest is not None:
+        if not isinstance(dest, dict):
+            return "bad_frame"
+        if not isinstance(dest.get("name"), str):
+            return "bad_frame"
     return None
 
 
@@ -101,10 +140,21 @@ def _validate_nack(frame: dict[str, Any]) -> str | None:
 
 
 def _validate_reply(frame: dict[str, Any]) -> str | None:
+    """Validate a ``reply``.
+
+    ``source`` names the sender whose ``callback_url`` the reply goes to, and
+    therefore whose HMAC credential will sign it once BC-WAKE-008 lands.  The
+    optional ``destination`` says which addressee is replying, so the outbox can
+    answer "who is the peer" without inferring it from a connection — the
+    prerequisite the outbound-auth items were missing.
+    """
     for key in ("reply_id", "source", "in_reply_to", "content"):
         err = _require_str(frame, key)
         if err:
             return err
+    dest = frame.get("destination")
+    if dest is not None and not isinstance(dest, str):
+        return "bad_frame"
     return None
 
 

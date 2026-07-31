@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from ulid import ULID
 
+from . import addressing
 from .proto import (
     MAX_FRAME_SIZE,
     BadFrameError,
@@ -34,9 +35,25 @@ MAX_CONNECTIONS = 16
 PING_INTERVAL = 30.0
 PONG_TIMEOUT = 10.0
 
+#: How many consecutive missed pongs to forgive while a delivery is in flight
+#: (BC-011).  A wake event that starts a model turn can keep an adapter's event
+#: loop busy for minutes; killing that connection because a ping went unanswered
+#: is the liveness check deciding a *delivery* question. Bounded rather than
+#: unconditional: a peer that died mid-delivery would otherwise never be reaped,
+#: so tolerance is 4 intervals (~2 minutes) and then the connection goes.
+MAX_BUSY_MISSED_PONGS = 4
+
 
 class ClientConnection:
-    """One subscribed adapter connection."""
+    """One subscribed adapter connection: the *connection* lifecycle only.
+
+    The *delivery* lifecycle deliberately lives in the router (BC-011).  v1
+    conflated them — the heartbeat closed a connection on a missed pong with no
+    idea whether it had just handed that adapter a wake event to work on — and
+    the fix is not a shared counter but an owner for each question: the socket
+    server owns "is this peer alive", the router owns "does this peer owe me an
+    ack", and the heartbeat asks the router before acting.
+    """
 
     def __init__(
         self,
@@ -46,14 +63,20 @@ class ClientConnection:
         sources: list[str],
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        destinations: list[str] | None = None,
     ):
         self.session_id = session_id
         self.adapter = adapter
         self.instance = instance
         self.sources = sources
+        self.destinations = list(
+            destinations if destinations is not None else sources
+        )
         self._reader = reader
         self._writer = writer
         self.pending_ping: bool = False
+        #: Consecutive missed pongs forgiven because a delivery was outstanding.
+        self.busy_missed_pongs: int = 0
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         self._writer.write(encode_frame(frame))
@@ -134,16 +157,40 @@ class SocketServer:
         self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
     async def _heartbeat_loop(self) -> None:
-        """Send pings every PING_INTERVAL; close connections that don't pong."""
+        """Send pings every PING_INTERVAL; close connections that don't pong.
+
+        A missed pong on a connection with an **in-flight delivery** is forgiven
+        up to ``MAX_BUSY_MISSED_PONGS`` times (BC-011).  A wake event whose whole
+        purpose is to start a model turn can occupy a single-threaded adapter for
+        far longer than the ping interval, and killing it there means the
+        liveness probe reaps the healthy connection it just woke — the event is
+        lost and the operator sees "heartbeat timeout" for an adapter that was
+        doing exactly what it was asked.  Bounded, because unconditional
+        forgiveness would leak a peer that died mid-delivery.
+        """
         while True:
             await asyncio.sleep(PING_INTERVAL)
             _time.monotonic()
             stale: list[str] = []
             for session_id, conn in list(self._connections.items()):
                 if conn.pending_ping:
+                    in_flight = self._router.in_flight_for(session_id)
+                    if in_flight and conn.busy_missed_pongs < MAX_BUSY_MISSED_PONGS:
+                        conn.busy_missed_pongs += 1
+                        log.info(
+                            "heartbeat: session_id=%s missed a pong with %d "
+                            "delivery(ies) in flight; tolerating (%d/%d)",
+                            session_id,
+                            in_flight,
+                            conn.busy_missed_pongs,
+                            MAX_BUSY_MISSED_PONGS,
+                        )
+                        continue
                     # No pong received since last ping — dead connection
                     log.warning(
-                        "heartbeat timeout session_id=%s, closing", session_id
+                        "heartbeat timeout session_id=%s in_flight=%d, closing",
+                        session_id,
+                        in_flight,
                     )
                     stale.append(session_id)
                     continue
@@ -234,9 +281,28 @@ class SocketServer:
             )
             raise ConnectionError("connection limit reached")
 
-        sources = frame.get("filters", {}).get("sources", [])
+        sources = frame.get("filters", {}).get("sources", []) or []
+        claimed = frame.get("destinations")
         adapter = frame["adapter"]
         instance = frame["instance"]
+
+        destinations = self._router.destinations_for_hello(adapter, sources, claimed)
+
+        # Per-destination connection cap (BC-WAKE-010). The global
+        # MAX_CONNECTIONS above is a process-resource bound; this is a
+        # *per-addressee* bound, which is the thing the v1 model could not
+        # express — one chatty adapter filling all 16 slots starved every other
+        # destination and there was no object to hang a smaller number on.
+        over = self._destinations_over_cap(destinations)
+        if over:
+            detail = ", ".join(f"{name} (max {cap})" for name, cap in over)
+            await self._send_error(
+                writer,
+                "connection_limit",
+                f"destination connection cap reached: {detail}",
+                fatal=True,
+            )
+            raise ConnectionError(f"destination cap reached: {detail}")
 
         conn = ClientConnection(
             session_id=session_id,
@@ -245,9 +311,12 @@ class SocketServer:
             sources=sources,
             reader=reader,
             writer=writer,
+            destinations=destinations,
         )
         self._connections[session_id] = conn
-        self._router.subscribe(session_id, adapter, instance, sources, conn)
+        self._router.subscribe(
+            session_id, adapter, instance, sources, conn, destinations=destinations
+        )
 
         accepted = self._router.accepted_sources_for(adapter, sources)
 
@@ -256,16 +325,37 @@ class SocketServer:
             "v": 1,
             "session_id": session_id,
             "accepted_sources": accepted,
+            "accepted_destinations": destinations,
         }
         await conn.send_frame(ack)
         log.info(
-            "adapter subscribed session_id=%s adapter=%s instance=%s accepted_sources=%s",
+            "adapter subscribed session_id=%s adapter=%s instance=%s "
+            "accepted_sources=%s accepted_destinations=%s",
             session_id,
             adapter,
             instance,
             accepted,
+            destinations,
         )
         return conn
+
+    def _destinations_over_cap(
+        self, destinations: list[str]
+    ) -> list[tuple[str, int]]:
+        """Destinations whose ``max_connections`` this connection would exceed.
+
+        Checked before the connection is registered, so the count it compares
+        against is the set of *already-admitted* subscribers.
+        """
+        table = addressing.destination_table(self._router.config)
+        over: list[tuple[str, int]] = []
+        for name in destinations:
+            dest = table.get(name)
+            if dest is None or dest.max_connections is None:
+                continue
+            if self._router.destination_load(name) >= dest.max_connections:
+                over.append((name, dest.max_connections))
+        return over
 
     async def _frame_loop(self, conn: ClientConnection) -> None:
         while True:
@@ -305,6 +395,7 @@ class SocketServer:
                 self._router.resolve_ack(frame.get("ack_id", ""), ftype)
             elif ftype == "pong":
                 conn.pending_ping = False
+                conn.busy_missed_pongs = 0
                 log.debug("pong from session_id=%s", conn.session_id)
             else:
                 log.warning(
