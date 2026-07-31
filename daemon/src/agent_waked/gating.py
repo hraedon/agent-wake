@@ -1,7 +1,7 @@
 """HMAC gating for inbound wake events."""
 
-import hmac
 import hashlib
+import hmac
 from typing import Any
 
 

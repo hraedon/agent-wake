@@ -5,7 +5,6 @@ No real Vault server is needed — vault tests are mocked.
 """
 
 import json
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,12 +12,8 @@ import pytest
 
 from agent_waked.cli import main as cli_main
 from agent_waked.cli.secrets import (
-    _env_file_path,
-    _load_raw_config,
     _source_to_uris,
-    build_parser,
 )
-
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -68,7 +63,7 @@ def _run(args: list[str]) -> int:
     """Run the CLI with given args list, returns exit code."""
     import sys as _sys
     old_argv = _sys.argv
-    _sys.argv = ["agent-wake"] + args
+    _sys.argv = ["agent-wake", *args]
     try:
         return cli_main()
     finally:
@@ -79,7 +74,7 @@ def _run(args: list[str]) -> int:
 
 
 def test_secrets_list(cfg_env, capsys):
-    cfg_path, tmp_path = cfg_env
+    _cfg_path, _tmp_path = cfg_env
     rc = _run(["secrets", "list"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -89,8 +84,8 @@ def test_secrets_list(cfg_env, capsys):
 
 def test_secrets_list_no_values_in_output(cfg_env, capsys):
     """Secret material must never appear in list output."""
-    cfg_path, tmp_path = cfg_env
-    rc = _run(["secrets", "list"])
+    _cfg_path, _tmp_path = cfg_env
+    _run(["secrets", "list"])
     out = capsys.readouterr().out
     assert "aaaa" not in out  # the actual secret value
 
@@ -99,7 +94,7 @@ def test_secrets_list_no_values_in_output(cfg_env, capsys):
 
 
 def test_secrets_add_env_creates_source(cfg_empty, capsys):
-    cfg_path, tmp_path = cfg_empty
+    cfg_path, _tmp_path = cfg_empty
     rc = _run(["secrets", "add", "newsource", "--backend", "env"])
     assert rc == 0
     raw = json.loads(cfg_path.read_text())
@@ -110,7 +105,7 @@ def test_secrets_add_env_creates_source(cfg_empty, capsys):
 
 
 def test_secrets_add_env_writes_env_file(cfg_empty, capsys):
-    cfg_path, tmp_path = cfg_empty
+    _cfg_path, tmp_path = cfg_empty
     rc = _run(["secrets", "add", "newsource2", "--backend", "env"])
     assert rc == 0
     env_file = tmp_path / "secrets.env"
@@ -120,14 +115,14 @@ def test_secrets_add_env_writes_env_file(cfg_empty, capsys):
 
 
 def test_secrets_add_env_prints_secret_once(cfg_empty, capsys):
-    cfg_path, tmp_path = cfg_empty
+    _cfg_path, _tmp_path = cfg_empty
     rc = _run(["secrets", "add", "newsource3", "--backend", "env"])
     assert rc == 0
     out = capsys.readouterr().out
     # Secret should appear in stdout
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
     # There should be a 64-char hex line (32 bytes hex)
-    hex_lines = [l for l in lines if len(l) == 64 and all(c in "0123456789abcdef" for c in l)]
+    hex_lines = [line for line in lines if len(line) == 64 and all(c in "0123456789abcdef" for c in line)]
     assert len(hex_lines) == 1
 
 
@@ -142,7 +137,7 @@ def test_secrets_add_env_custom_name(cfg_empty, capsys):
 
 
 def test_secrets_add_env_refuses_existing_source(cfg_env, capsys):
-    cfg_path, tmp_path = cfg_env
+    _cfg_path, _tmp_path = cfg_env
     rc = _run(["secrets", "add", "demo", "--backend", "env"])
     assert rc != 0
     err = capsys.readouterr().err
@@ -150,7 +145,7 @@ def test_secrets_add_env_refuses_existing_source(cfg_env, capsys):
 
 
 def test_secrets_add_env_file_mode_600(cfg_empty):
-    cfg_path, tmp_path = cfg_empty
+    _cfg_path, tmp_path = cfg_empty
     rc = _run(["secrets", "add", "sectest", "--backend", "env"])
     assert rc == 0
     env_file = tmp_path / "secrets.env"
@@ -162,7 +157,7 @@ def test_secrets_add_env_file_mode_600(cfg_empty):
 
 
 def test_secrets_rotate_promotes_to_list(cfg_env, monkeypatch, capsys):
-    cfg_path, tmp_path = cfg_env
+    cfg_path, _tmp_path = cfg_env
     monkeypatch.setattr("agent_waked.cli.secrets._sighup_daemon", lambda: None)
     rc = _run(["secrets", "rotate", "demo"])
     assert rc == 0
@@ -180,7 +175,7 @@ def test_secrets_rotate_promotes_to_list(cfg_env, monkeypatch, capsys):
 
 def test_secrets_rotate_trims_to_two(cfg_env, monkeypatch, capsys):
     """Second rotation should trim list back to 2."""
-    cfg_path, tmp_path = cfg_env
+    cfg_path, _tmp_path = cfg_env
     monkeypatch.setattr("agent_waked.cli.secrets._sighup_daemon", lambda: None)
     # First rotate
     _run(["secrets", "rotate", "demo"])
@@ -193,18 +188,18 @@ def test_secrets_rotate_trims_to_two(cfg_env, monkeypatch, capsys):
 
 
 def test_secrets_rotate_prints_new_secret(cfg_env, monkeypatch, capsys):
-    cfg_path, tmp_path = cfg_env
+    _cfg_path, _tmp_path = cfg_env
     monkeypatch.setattr("agent_waked.cli.secrets._sighup_daemon", lambda: None)
     rc = _run(["secrets", "rotate", "demo"])
     assert rc == 0
     out = capsys.readouterr().out
-    hex_lines = [l.strip() for l in out.splitlines()
-                 if len(l.strip()) == 64 and all(c in "0123456789abcdef" for c in l.strip())]
+    hex_lines = [line.strip() for line in out.splitlines()
+                 if len(line.strip()) == 64 and all(c in "0123456789abcdef" for c in line.strip())]
     assert len(hex_lines) == 1
 
 
 def test_secrets_rotate_unknown_source(cfg_env, capsys):
-    cfg_path, tmp_path = cfg_env
+    _cfg_path, _tmp_path = cfg_env
     rc = _run(["secrets", "rotate", "doesntexist"])
     assert rc != 0
     err = capsys.readouterr().err
@@ -244,7 +239,7 @@ def test_secrets_remove_cleans_env_file(cfg_empty, monkeypatch, capsys):
     assert "AGENT_WAKE_TOCLEAN_SECRET=" in env_file.read_text()
 
     # Now remove it — need existing source to remain valid
-    raw = json.loads(cfg_path.read_text())
+    json.loads(cfg_path.read_text())
     # existing source is already there from cfg_empty fixture
     rc = _run(["secrets", "remove", "toclean"])
     assert rc == 0

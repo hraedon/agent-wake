@@ -5,14 +5,10 @@ import json
 import pytest
 
 from agent_waked.proto import (
-    MAX_FRAME_SIZE,
-    BadFrameError,
-    FrameTooLargeError,
     decode_line,
     encode_frame,
     validate_frame,
 )
-
 
 # ── round-trip ────────────────────────────────────────────────────────
 

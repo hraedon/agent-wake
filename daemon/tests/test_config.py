@@ -1,7 +1,6 @@
 """Tests for agent_waked.config — schema validation, URI forms, backwards compat."""
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -220,7 +219,7 @@ def test_vault_block_missing_addr_raises(tmp_path, monkeypatch):
         }
     })
     monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
-    with pytest.raises(ConfigError, match="vault.addr"):
+    with pytest.raises(ConfigError, match=r"vault.addr"):
         load_config()
 
 

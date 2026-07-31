@@ -24,7 +24,6 @@ import json
 import os
 import shutil
 import socket
-import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -36,10 +35,8 @@ try:
 except Exception:
     _VERSION = "0.1.0"
 
-from .config import DEFAULT_CONFIG_PATH, load_config
-from .config import ConfigError
 from . import suite_config
-
+from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
 
 # ── check helpers ─────────────────────────────────────────────────────────────
 
@@ -80,7 +77,7 @@ def _check_ingress_reachable() -> tuple[str, str]:
     try:
         with socket.create_connection((host, port), timeout=2.0):
             pass
-    except (ConnectionRefusedError, OSError, socket.timeout):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return "warn", f"daemon not reachable at {host}:{port} (may not be running)"
 
     try:

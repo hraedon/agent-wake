@@ -72,7 +72,7 @@ class TestReloadConfig:
                 "routing": {},
             }
             router = Router(live_cfg)
-            outbox = Outbox(live_cfg)
+            Outbox(live_cfg)
 
             _reload_config(live_cfg, router)
 
@@ -95,7 +95,7 @@ class TestReloadConfig:
                 "routing": {},
             }
             router = Router(live_cfg)
-            outbox = Outbox(live_cfg)
+            Outbox(live_cfg)
 
             _reload_config(live_cfg, router)
 
@@ -109,7 +109,7 @@ class TestReloadConfig:
             "routing": {},
         }
         router = Router(live_cfg)
-        outbox = Outbox(live_cfg)
+        Outbox(live_cfg)
 
         with patch("agent_waked.main.load_config", side_effect=ConfigError("bad")):
             _reload_config(live_cfg, router)
@@ -138,7 +138,7 @@ class TestReloadConfig:
                 "routing": {},
             }
             router = Router(live_cfg)
-            outbox = Outbox(live_cfg)
+            Outbox(live_cfg)
 
             _reload_config(live_cfg, router)
 
@@ -163,7 +163,7 @@ class TestReloadConfig:
                 "routing": {},
             }
             router = Router(live_cfg)
-            outbox = Outbox(live_cfg)
+            Outbox(live_cfg)
 
             with caplog.at_level(logging.WARNING, logger="agent_waked"):
                 _reload_config(live_cfg, router)

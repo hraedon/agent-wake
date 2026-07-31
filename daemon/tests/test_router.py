@@ -1,6 +1,5 @@
 """Tests for agent_waked.router — source → adapter routing."""
 
-import asyncio
 
 import pytest
 

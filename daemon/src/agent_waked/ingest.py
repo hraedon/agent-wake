@@ -158,6 +158,10 @@ def create_ingest_app(
     store: "WakeStore | None" = None,
 ) -> web.Application:
     dedupe = Dedupe(store=store)
+    # RUF006: an ``ensure_future`` task nobody holds a reference to can be
+    # garbage-collected mid-flight, silently dropping the delivery. Same
+    # treatment as ``Router._background_tasks``.
+    delivery_tasks: set[asyncio.Task[Any]] = set()
 
     async def post_root(request: web.Request) -> web.Response:
         raw_body = await request.read()
@@ -278,7 +282,9 @@ def create_ingest_app(
                             "event_id": event_id,
                         },
                     )
-                asyncio.ensure_future(delivery.deliver(event))
+                task = asyncio.ensure_future(delivery.deliver(event))
+                delivery_tasks.add(task)
+                task.add_done_callback(delivery_tasks.discard)
                 delivery_result = {
                     "status": "dispatched",
                     "principal_id": principal_id,

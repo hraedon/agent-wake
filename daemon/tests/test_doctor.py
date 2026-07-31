@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_waked.doctor import run_checks, format_text
+from agent_waked.doctor import format_text, run_checks
 
 
 def _write_config(path: Path, data: dict) -> None:
@@ -214,8 +214,9 @@ def test_adapters_installed_finds_opencode(cfg_with_secret):
 
 
 def test_main_json_output(cfg_with_secret, capsys):
-    from agent_waked.cli import main as cli_main
     import sys as _sys
+
+    from agent_waked.cli import main as cli_main
     old_argv = _sys.argv
     _sys.argv = ["agent-wake", "doctor", "--json"]
     try:
@@ -230,8 +231,9 @@ def test_main_json_output(cfg_with_secret, capsys):
 
 
 def test_main_text_output(cfg_with_secret, capsys):
-    from agent_waked.cli import main as cli_main
     import sys as _sys
+
+    from agent_waked.cli import main as cli_main
     old_argv = _sys.argv
     _sys.argv = ["agent-wake", "doctor"]
     try:
@@ -270,7 +272,7 @@ def _cfg_with_delivery(tmp_path, monkeypatch, delivery):
 def test_delivery_health_skip_when_no_delivery(cfg_with_secret):
     """No delivery config → skip (Plan 005 not deployed)."""
     from agent_waked.doctor import _check_delivery_health
-    status, detail = _check_delivery_health()
+    status, _detail = _check_delivery_health()
     assert status == "skip"
 
 

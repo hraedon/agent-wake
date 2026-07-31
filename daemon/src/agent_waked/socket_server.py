@@ -137,7 +137,7 @@ class SocketServer:
         """Send pings every PING_INTERVAL; close connections that don't pong."""
         while True:
             await asyncio.sleep(PING_INTERVAL)
-            now = _time.monotonic()
+            _time.monotonic()
             stale: list[str] = []
             for session_id, conn in list(self._connections.items()):
                 if conn.pending_ping:

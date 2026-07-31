@@ -26,7 +26,7 @@ class DeliveryChannel(Protocol):
         self,
         event: dict[str, Any],
         channel_cfg: dict[str, Any],
-        resolver: "SecretResolver",
+        resolver: SecretResolver,
     ) -> dict[str, Any]:
         """Deliver *event* via this channel.
 

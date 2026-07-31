@@ -71,7 +71,7 @@ def load_config() -> dict[str, Any]:
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         try:
             raw = json.load(f)
         except json.JSONDecodeError as e:
@@ -461,7 +461,7 @@ def _validate_email_channel(cfg: dict[str, Any], pid: str) -> dict[str, Any]:
     port = cfg.get("smtp_port", 587)
     if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
         raise ConfigError(
-            f"Principal {pid!r} email: 'smtp_port' must be an integer 1–65535."
+            f"Principal {pid!r} email: 'smtp_port' must be an integer 1-65535."
         )
     result["smtp_port"] = port
 

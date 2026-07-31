@@ -26,7 +26,7 @@ import argparse
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..config import ConfigError, load_config
@@ -34,7 +34,7 @@ from ..store import WakeStore, open_store
 
 
 def _build_queue_parsers(
-    sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """Add the ``dead-letter`` and ``pending`` subcommands."""
     dl = sub.add_parser(
@@ -118,7 +118,7 @@ def _open(cfg: dict[str, Any] | None = None) -> WakeStore:
 def _ts(value: float | None) -> str | None:
     if value is None:
         return None
-    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(
+    return datetime.fromtimestamp(value, tz=UTC).isoformat(
         timespec="seconds"
     )
 

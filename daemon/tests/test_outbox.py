@@ -8,7 +8,6 @@ Acceptance criteria (spec §Phase 3):
 """
 
 import asyncio
-import json
 
 import pytest
 from aiohttp import web

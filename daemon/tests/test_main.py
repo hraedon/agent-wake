@@ -6,8 +6,7 @@ import logging
 import pytest
 
 from agent_waked.config import ConfigError
-from agent_waked.main import _warn_non_loopback_bind, _is_loopback, resolve_listen
-
+from agent_waked.main import _is_loopback, _warn_non_loopback_bind, resolve_listen
 
 # ── _warn_non_loopback_bind ───────────────────────────────────────────────────
 

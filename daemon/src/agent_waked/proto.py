@@ -7,7 +7,7 @@ no BOM.  Lines longer than 1 MiB trigger ``frame_too_large``.
 """
 
 import json
-from typing import Any, Sequence
+from typing import Any
 
 MAX_FRAME_SIZE = 1 * 1024 * 1024  # 1 MiB
 

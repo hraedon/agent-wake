@@ -108,7 +108,7 @@ class EmailChannel:
         self,
         event: dict[str, Any],
         channel_cfg: dict[str, Any],
-        resolver: "SecretResolver",
+        resolver: SecretResolver,
     ) -> dict[str, Any]:
         host = channel_cfg["smtp_host"]
         port = int(channel_cfg["smtp_port"])

@@ -9,7 +9,8 @@ correct subscriber based on the daemon config's ``routing`` block.
 
 import asyncio
 import logging
-from typing import Any, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from ulid import ULID
 
@@ -32,7 +33,7 @@ VALID_DELIVERY_MODES = frozenset({_LIVE_ONLY}) | _DURABLE_MODES
 
 
 class _Subscriber:
-    __slots__ = ("session_id", "adapter", "instance", "sources", "connection")
+    __slots__ = ("adapter", "connection", "instance", "session_id", "sources")
 
     def __init__(
         self,
@@ -56,6 +57,12 @@ class Router:
         self._subscribers: dict[str, _Subscriber] = {}
         self._order: list[str] = []
         self._pending_acks: dict[str, asyncio.Future[str]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     # ── next-session delivery (Plan 006 Phase 1 / BC-WAKE-012) ───────────────
 
@@ -186,7 +193,7 @@ class Router:
             self._pending_acks.pop(ack_id, None)
             self._evict(sub.session_id)
             return False
-        asyncio.ensure_future(
+        self._spawn_background(
             self._wait_for_ack(
                 row.source,
                 ack_id,
@@ -283,7 +290,7 @@ class Router:
         )
 
         # Track ack in background; don't block the HTTP response
-        asyncio.ensure_future(
+        self._spawn_background(
             self._wait_for_ack(source, ack_id, target.session_id, fut)
         )
 
@@ -335,7 +342,7 @@ class Router:
                 ack_id,
                 outcome,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "ack timeout source=%s ack_id=%s session_id=%s timeout=%.0fs",
                 source,

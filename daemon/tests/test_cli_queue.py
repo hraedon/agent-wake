@@ -279,7 +279,7 @@ def test_pending_prune_expires_into_dead_letter(state_dir, capsys, monkeypatch):
 def test_pending_source_filter(store, capsys):
     store.enqueue_pending({"event_id": "a", "source": "alpha", "meta": {}})
     store.enqueue_pending({"event_id": "b", "source": "beta", "meta": {}})
-    code, doc = _json_out(capsys, "pending", "list", "--source", "beta", "--json")
+    _code, doc = _json_out(capsys, "pending", "list", "--source", "beta", "--json")
     assert [d["event_id"] for d in doc["pending"]] == ["b"]
 
 

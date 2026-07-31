@@ -5,16 +5,14 @@ Covers: read path, TTL behaviour, AppRole login retry on token expiry,
 SIGHUP-triggered refresh.
 """
 
-import asyncio
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_waked.secrets.vault import VaultBackend
 from agent_waked.secrets.resolver import SecretResolver
-
+from agent_waked.secrets.vault import VaultBackend
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

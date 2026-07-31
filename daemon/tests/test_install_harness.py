@@ -1,22 +1,16 @@
 """Tests for agent-wake install-harness CLI subcommand."""
 
 import json
-import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from agent_waked.cli.install_harness import (
-    _wire_claude,
-    _wire_opencode,
-    _wire_hermes,
     _run_install,
-    _load_manifest,
-    _save_manifest,
-    _MANIFEST_PATH,
-    _CLAUDE_SETTINGS,
-    _OPENCODE_CONFIG,
+    _wire_claude,
+    _wire_hermes,
+    _wire_opencode,
 )
 
 
@@ -84,7 +78,7 @@ def test_claude_install_missing_adapter(isolated_home):
 
 def test_claude_install_dry_run_does_not_write(isolated_home):
     with patch("agent_waked.cli.install_harness.shutil.which", return_value="/fake/agent-wake-claude"):
-        actions = _wire_claude(dry_run=True, uninstall=False, user=None)
+        _wire_claude(dry_run=True, uninstall=False, user=None)
 
     assert not isolated_home.claude.exists()
     assert not isolated_home.manifest.exists()

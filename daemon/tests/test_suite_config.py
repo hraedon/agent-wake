@@ -1,17 +1,12 @@
 """Tests for suite_config — suite.env parsing and precedence."""
 
-import os
 from pathlib import Path
-
-import pytest
 
 from agent_waked.suite_config import (
     _parse_env_file,
-    resolve_suite_env,
-    regista_config,
     is_suite_configured,
-    per_user_path,
-    system_path,
+    regista_config,
+    resolve_suite_env,
 )
 
 

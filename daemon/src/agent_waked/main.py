@@ -337,7 +337,7 @@ async def _run() -> int:
         reload_event.clear()
         stop_task = asyncio.ensure_future(stop_event.wait())
         reload_task = asyncio.ensure_future(reload_event.wait())
-        done, pending = await asyncio.wait(
+        _done, pending = await asyncio.wait(
             [stop_task, reload_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -354,7 +354,7 @@ async def _run() -> int:
         store.close()
     try:
         await asyncio.wait_for(runner.cleanup(), timeout=_DRAIN_TIMEOUT)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("runner cleanup timed out after %ds", _DRAIN_TIMEOUT)
     return 0
 

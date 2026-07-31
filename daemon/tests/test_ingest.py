@@ -6,7 +6,6 @@ import hmac
 import json
 
 import pytest
-
 from aiohttp.test_utils import TestClient, TestServer
 
 from agent_waked.ingest import create_ingest_app

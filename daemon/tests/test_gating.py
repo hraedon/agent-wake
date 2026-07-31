@@ -1,8 +1,7 @@
-import pytest
-import hmac
 import hashlib
+import hmac
 
-from agent_waked.gating import verify_signature, check_trigger_identity
+from agent_waked.gating import check_trigger_identity, verify_signature
 
 
 def test_verify_valid_signature():

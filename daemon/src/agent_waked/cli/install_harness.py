@@ -35,7 +35,6 @@ import argparse
 import json
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any

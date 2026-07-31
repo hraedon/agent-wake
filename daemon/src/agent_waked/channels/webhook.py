@@ -59,7 +59,7 @@ class WebhookChannel:
         self,
         event: dict[str, Any],
         channel_cfg: dict[str, Any],
-        resolver: "SecretResolver",
+        resolver: SecretResolver,
     ) -> dict[str, Any]:
         url = channel_cfg["url"]
         secret_uri = channel_cfg["secret_uri"]

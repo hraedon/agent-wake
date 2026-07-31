@@ -4,21 +4,17 @@ Covers: cache hit/miss, refresh, missing env var error, multi-URI resolve_all,
 any-of HMAC verification with two valid secrets and one invalid signature.
 """
 
-import asyncio
 import hashlib
 import hmac
 import json
-import time
 
 import pytest
-
 from aiohttp.test_utils import TestClient, TestServer
 
-from agent_waked.gating import verify_signature, verify_signature_any
+from agent_waked.gating import verify_signature_any
 from agent_waked.ingest import create_ingest_app
 from agent_waked.secrets.env import EnvBackend
 from agent_waked.secrets.resolver import SecretResolver, _parse_duration
-
 
 # ── _parse_duration ───────────────────────────────────────────────────────────
 
@@ -202,7 +198,7 @@ async def two_secret_client(monkeypatch):
     }
 
     class MockRouter:
-        delivered: list = []
+        delivered: list = []  # noqa: RUF012
         async def deliver(self, event):  # type: ignore[override]
             self.delivered.append(event)
             return "queued"
@@ -218,7 +214,7 @@ async def two_secret_client(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ingest_current_secret_accepted(two_secret_client):
-    cli, router = two_secret_client
+    cli, _router = two_secret_client
     body = json.dumps({"v": 0, "event_id": "x1", "source": "test",
                        "kind": "alert", "content": "hi", "meta": {}, "wake": True}).encode()
     resp = await cli.post("/", data=body, headers={
@@ -230,7 +226,7 @@ async def test_ingest_current_secret_accepted(two_secret_client):
 
 @pytest.mark.asyncio
 async def test_ingest_previous_secret_accepted(two_secret_client):
-    cli, router = two_secret_client
+    cli, _router = two_secret_client
     body = json.dumps({"v": 0, "event_id": "x2", "source": "test",
                        "kind": "alert", "content": "hi", "meta": {}, "wake": True}).encode()
     resp = await cli.post("/", data=body, headers={
@@ -242,7 +238,7 @@ async def test_ingest_previous_secret_accepted(two_secret_client):
 
 @pytest.mark.asyncio
 async def test_ingest_unknown_secret_rejected(two_secret_client):
-    cli, router = two_secret_client
+    cli, _router = two_secret_client
     body = json.dumps({"v": 0, "event_id": "x3", "source": "test",
                        "kind": "alert", "content": "hi", "meta": {}, "wake": True}).encode()
     resp = await cli.post("/", data=body, headers={
