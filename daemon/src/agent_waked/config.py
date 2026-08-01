@@ -101,6 +101,25 @@ def _has_vault_uri(uris: list[str]) -> bool:
     return any(u.startswith("vault://") for u in uris)
 
 
+def _validate_wake_block(raw: object) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("'wake' must be an object.")
+    result: dict[str, Any] = {}
+    hmac_secret = raw.get("hmac_secret")
+    if hmac_secret is not None:
+        values = [hmac_secret] if isinstance(hmac_secret, str) else hmac_secret
+        if not isinstance(values, list) or not values:
+            raise ConfigError("'wake.hmac_secret' must be a string or non-empty list.")
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ConfigError("'wake.hmac_secret' entries must be non-empty strings.")
+        if not any(part.strip() for value in values for part in value.split(",")):
+            raise ConfigError("'wake.hmac_secret' must contain at least one key.")
+        result["hmac_secret"] = hmac_secret
+    return result
+
+
 def load_config() -> dict[str, Any]:
     config_path = os.environ.get("AGENT_WAKE_CONFIG")
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
@@ -187,6 +206,7 @@ def load_config() -> dict[str, Any]:
         "routing": routing,
         "vault": vault_cfg,
         "state": _validate_state_block(raw.get("state")),
+        "wake": _validate_wake_block(raw.get("wake")),
     }
     # ``sources`` is the same object as ``senders``, not a copy: an alias that
     # can drift is worse than no alias, because half the daemon would then

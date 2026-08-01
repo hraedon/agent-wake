@@ -11,6 +11,7 @@ nothing but a warning line.
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ from urllib.parse import urlparse
 from aiohttp import ClientSession, ClientTimeout
 
 from . import addressing
+from .wake_hmac import SIGNATURE_HEADER, load_keys, sign_body
 
 if TYPE_CHECKING:
     from .store import WakeStore
@@ -193,6 +195,14 @@ class Outbox:
             "content": content,
             "meta": self.peer_identity(source, destination),
         }
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Idempotency-Key": reply_id,
+        }
+        signature = sign_body(body, load_keys(self._config))
+        if signature is not None:
+            headers[SIGNATURE_HEADER] = signature
 
         last_error: str | None = None
         last_http_status: int | None = None
@@ -204,7 +214,8 @@ class Outbox:
                     raise RuntimeError("outbox not started")
                 async with self._session.post(
                     callback_url,
-                    json=payload,
+                    data=body,
+                    headers=headers,
                     # A hijacked-but-valid callback could otherwise 301 this
                     # body to an internal target (e.g. cloud metadata) that
                     # nothing validates. See _validate_callback_url for why

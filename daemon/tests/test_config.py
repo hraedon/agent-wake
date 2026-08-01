@@ -348,6 +348,31 @@ def test_state_block_rejects_bad_delivery_mode(tmp_path, monkeypatch):
         load_config()
 
 
+def test_wake_hmac_secret_accepts_rotation_list(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"hmac_secret": ["current", "previous"]},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    assert load_config()["wake"]["hmac_secret"] == ["current", "previous"]
+
+
+def test_wake_hmac_secret_rejects_empty_key_list(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"hmac_secret": []},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    with pytest.raises(ConfigError, match=r"wake\.hmac_secret"):
+        load_config()
+
+
 def test_state_block_rejects_non_positive_retention(tmp_path, monkeypatch):
     _state_cfg(tmp_path, monkeypatch, {"dedupe_max_rows": 0})
     with pytest.raises(ConfigError, match="must be a positive integer"):

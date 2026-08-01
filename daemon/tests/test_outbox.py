@@ -8,12 +8,14 @@ Acceptance criteria (spec §Phase 3):
 """
 
 import asyncio
+import json
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from agent_waked.outbox import Outbox
+from agent_waked.wake_hmac import verify_body
 
 
 def _config(callback_url=None, default_callback_url=None):
@@ -87,6 +89,68 @@ async def test_reply_delivered_to_callback():
             "content": "deployed!",
             "meta": {},
         }
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_is_signed_with_dedicated_wake_key(monkeypatch):
+    received = []
+
+    async def handler(request):
+        received.append((await request.read(), dict(request.headers)))
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/callback", handler)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    monkeypatch.setenv("WAKE_HMAC_SECRET", "current,previous")
+    try:
+        ob = Outbox(_config(callback_url=str(cli.make_url("/callback"))))
+        await ob.start()
+        result = await ob.deliver(
+            source="github-actions",
+            reply_id="rpl-signed",
+            in_reply_to="evt-signed",
+            content="signed",
+        )
+        await ob.close()
+
+        body, headers = received[0]
+        assert result["status"] == "delivered"
+        assert json.loads(body)["content"] == "signed"
+        assert headers["Idempotency-Key"] == "rpl-signed"
+        assert verify_body(body, headers["X-Wake-Signature"], [b"current"])
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_is_unsigned_when_no_dedicated_key(monkeypatch):
+    headers_seen = []
+
+    async def handler(request):
+        headers_seen.append(dict(request.headers))
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_post("/callback", handler)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    monkeypatch.delenv("WAKE_HMAC_SECRET", raising=False)
+    try:
+        ob = Outbox(_config(callback_url=str(cli.make_url("/callback"))))
+        await ob.start()
+        await ob.deliver(
+            source="github-actions",
+            reply_id="rpl-unsigned",
+            in_reply_to="evt-unsigned",
+            content="unsigned",
+        )
+        await ob.close()
+
+        assert "X-Wake-Signature" not in headers_seen[0]
     finally:
         await cli.close()
 
