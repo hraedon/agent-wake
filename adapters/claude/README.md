@@ -127,7 +127,9 @@ green-path message.
 ## Permission relay
 
 The adapter forwards Claude Code `notifications/claude/channel/permission_request`
-to the `default_callback_url`.
+to the `default_callback_url`. When `WAKE_HMAC_SECRET` is configured, requests
+are signed using the shared [callback HMAC contract](../../docs/hmac-signing.md).
+Ingress source secrets are not used for permission signing.
 
 ## Test
 

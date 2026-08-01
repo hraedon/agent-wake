@@ -237,6 +237,29 @@ This generates a new secret, prepends it to `secrets: [...]` (auto-promoting fro
 
 After the next rotation, the previous secret is dropped. The key flows for this are covered in [`docs/secret-management.md`](docs/secret-management.md).
 
+### Signing outbound callbacks
+
+Reply callbacks use the dedicated `WAKE_HMAC_SECRET` when configured. See
+[`Callback HMAC signing`](../docs/hmac-signing.md) for the wire contract and
+rotation procedure. Ingress source secrets are not reused for callback signing.
+
+### Ingest rate limiting
+
+HTTP ingest uses an in-process token bucket per configured source, falling back
+to client IP for unknown sources. Defaults are 10 events/second with a burst of
+20. Override them in the `wake` block:
+
+```json
+{
+  "wake": {
+    "ingest_rate_limit": 10,
+    "ingest_rate_burst": 20
+  }
+}
+```
+
+Exhausted buckets return HTTP 429 with `Retry-After`.
+
 ### Removing a source
 
 ```bash
