@@ -9,7 +9,7 @@ import logging
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from agent_waked.ingest import create_ingest_app
+from agent_waked.ingest import SourceRateLimiter, create_ingest_app
 
 
 def _hmac(secret: bytes, body: bytes) -> str:
@@ -95,6 +95,65 @@ async def test_post_v0_event_queued(client, router):
     assert data["event_id"] == "evt-001"
     assert len(router.delivered) == 1
     assert router.delivered[0]["content"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_per_source_rate_limit_returns_429_with_retry_after():
+    config = _config()
+    config["wake"] = {"ingest_rate_limit": 1.0, "ingest_rate_burst": 1}
+    router = MockRouter()
+    cli = TestClient(TestServer(create_ingest_app(config, router)))
+    await cli.start_server()
+    try:
+        first_body = json.dumps({
+            "v": 0,
+            "event_id": "rate-1",
+            "source": "test",
+            "kind": "alert",
+            "content": "first",
+            "meta": {},
+            "wake": True,
+        }).encode()
+        second_body = json.dumps({
+            "v": 0,
+            "event_id": "rate-2",
+            "source": "test",
+            "kind": "alert",
+            "content": "second",
+            "meta": {},
+            "wake": True,
+        }).encode()
+
+        first = await _make_request(cli, first_body)
+        second = await _make_request(cli, second_body)
+
+        assert first.status == 202
+        assert second.status == 429
+        assert int(second.headers["Retry-After"]) >= 1
+        assert await second.json() == {"error": "rate limit exceeded"}
+    finally:
+        await cli.close()
+
+
+def test_rate_limit_bucket_refills_over_time():
+    now = [0.0]
+    limiter = SourceRateLimiter(2.0, 1, clock=lambda: now[0])
+
+    assert limiter.allow("source-a") == (True, 0.0)
+    allowed, retry_after = limiter.allow("source-a")
+    assert allowed is False
+    assert retry_after == pytest.approx(0.5)
+
+    now[0] = 0.5
+    assert limiter.allow("source-a") == (True, 0.0)
+
+
+def test_rate_limit_buckets_are_independent_per_source():
+    limiter = SourceRateLimiter(1.0, 1, clock=lambda: 0.0)
+
+    assert limiter.allow("source-a")[0] is True
+    assert limiter.allow("source-a")[0] is False
+    assert limiter.allow("source-b")[0] is True
 
 
 @pytest.mark.asyncio

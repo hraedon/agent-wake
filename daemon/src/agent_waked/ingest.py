@@ -9,7 +9,10 @@ gate + dedupe the handler calls ``Router.deliver(event)``.
 import asyncio
 import json
 import logging
+import math
+import time
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -204,6 +207,32 @@ def _json_response(status: int, payload: dict[str, Any]) -> web.Response:
     )
 
 
+class SourceRateLimiter:
+    """In-process token buckets keyed by configured source or client address."""
+
+    def __init__(
+        self,
+        rate: float,
+        burst: int,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._rate = rate
+        self._burst = float(burst)
+        self._clock = clock
+        self._buckets: dict[str, tuple[float, float]] = {}
+
+    def allow(self, identifier: str) -> tuple[bool, float]:
+        now = self._clock()
+        tokens, updated_at = self._buckets.get(identifier, (self._burst, now))
+        tokens = min(self._burst, tokens + max(0.0, now - updated_at) * self._rate)
+        if tokens >= 1.0:
+            self._buckets[identifier] = (tokens - 1.0, now)
+            return True, 0.0
+        self._buckets[identifier] = (tokens, now)
+        return False, (1.0 - tokens) / self._rate
+
+
 def create_ingest_app(
     config: dict[str, Any],
     router: "Router",
@@ -214,6 +243,11 @@ def create_ingest_app(
     store: "WakeStore | None" = None,
 ) -> web.Application:
     dedupe = Dedupe(store=store)
+    wake_cfg = config.get("wake") or {}
+    rate_limiter = SourceRateLimiter(
+        rate=float(wake_cfg.get("ingest_rate_limit", 10.0)),
+        burst=int(wake_cfg.get("ingest_rate_burst", 20)),
+    )
     # RUF006: an ``ensure_future`` task nobody holds a reference to can be
     # garbage-collected mid-flight, silently dropping the delivery. Same
     # treatment as ``Router._background_tasks``. The set is also what lets
@@ -290,6 +324,12 @@ def create_ingest_app(
         event_id_header = request.headers.get("X-AgentWake-Event-Id")
 
         source_cfg = config.get("sources", {}).get(source)
+        rate_identifier = source if source_cfg else (request.remote or "unknown")
+        allowed, retry_after = rate_limiter.allow(rate_identifier)
+        if not allowed:
+            rate_response = _json_response(429, {"error": "rate limit exceeded"})
+            rate_response.headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
+            return rate_response
         if not source_cfg:
             return _json_response(
                 403, {"error": "unknown source or invalid signature"}
