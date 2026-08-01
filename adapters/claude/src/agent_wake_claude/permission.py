@@ -1,16 +1,15 @@
 """Permission relay for Claude Code channel permission requests."""
 
-import hashlib
-import hmac as hmac_mod
 import json
 import logging
+import threading
 import time
 import urllib.request
-import threading
 from typing import Any
 
 from ._notify import send
 from .config import load_config
+from .wake_hmac import SIGNATURE_HEADER, load_keys, sign_body, verify_body
 
 _PENDING_TTL_SECONDS = 300  # 5 minutes
 
@@ -26,17 +25,14 @@ def _evict_expired() -> None:
         del _pending[k]
 
 
-def _hmac_sign(secret: bytes, body: bytes) -> str:
-    """Return sha256=<hex> HMAC signature."""
-    digest = hmac_mod.new(secret, body, hashlib.sha256).hexdigest()
-    return f"sha256={digest}"
-
-
-def _forward_permission_request(payload: dict[str, Any], callback_url: str, secret: bytes | None = None) -> None:
-    data = json.dumps(payload).encode("utf-8")
+def _forward_permission_request(
+    payload: dict[str, Any], callback_url: str, keys: tuple[bytes, ...] = ()
+) -> None:
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    if secret:
-        headers["X-AgentWake-Signature"] = _hmac_sign(secret, data)
+    signature = sign_body(data, keys)
+    if signature is not None:
+        headers[SIGNATURE_HEADER] = signature
     req = urllib.request.Request(
         callback_url,
         data=data,
@@ -65,18 +61,26 @@ def handle_permission_request(params: dict[str, Any]) -> None:
     config = load_config()
     callback_url = config.get("default_callback_url")
     if callback_url:
-        # Sign with the first available source's secret
-        secret = None
-        for src_cfg in config.get("sources", {}).values():
-            s = src_cfg.get("secret")
-            if s:
-                secret = s
-                break
-        _forward_permission_request(payload, callback_url, secret)
+        _forward_permission_request(payload, callback_url, load_keys(config))
 
     with _lock:
         _evict_expired()
         _pending[request_id] = (payload, time.monotonic())
+
+
+def verify_permission_body(
+    body: bytes,
+    signature: str | None,
+    *,
+    config: dict[str, Any] | None = None,
+    require_auth: bool = True,
+    now: int | None = None,
+) -> bool:
+    """Verify an inbound relay body; false maps to HTTP 401 for receivers."""
+    keys = load_keys(load_config() if config is None else config)
+    if signature is None:
+        return not require_auth
+    return verify_body(body, signature, keys, now=now)
 
 
 def handle_verdict(payload: dict[str, Any]) -> None:

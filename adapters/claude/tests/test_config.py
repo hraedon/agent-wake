@@ -126,3 +126,16 @@ def test_failed_reload_preserves_last_valid_config(monkeypatch, tmp_path):
         config_mod.reload_config()
 
     assert config_mod.load_config() is original
+
+
+def test_load_config_preserves_wake_hmac_rotation_list(monkeypatch, tmp_path):
+    path = tmp_path / "config.json"
+    _write_config(str(path), {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"hmac_secret": ["current", "previous"]},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(path))
+    config_mod._cached_config = None
+
+    assert config_mod.load_config()["wake"]["hmac_secret"] == ["current", "previous"]
