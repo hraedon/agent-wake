@@ -673,3 +673,25 @@ An ack or nack decrements the subscriber's in-flight count, which is what
                 continue
             accepted.append(s)
         return accepted
+    def subscriber_health(self) -> dict[str, Any]:
+        """Return source-level subscriber state for the health endpoint."""
+        sources = sorted(addressing.sender_table(self._config))
+        default_delivery = (self._config.get("state") or {}).get(
+            "default_delivery", _LIVE_ONLY
+        )
+        live_only_sources = sources if default_delivery == _LIVE_ONLY else []
+        by_source = {
+            source: sum(
+                1
+                for destination in addressing.routed_destinations(self._config, source)
+                if self._subscriber_for(destination) is not None
+            )
+            for source in sources
+        }
+        missing = [source for source in live_only_sources if by_source[source] == 0]
+        return {
+            "connected": len(self._subscribers),
+            "by_source": by_source,
+            "live_only_sources": live_only_sources,
+            "live_only_without_subscribers": missing,
+        }

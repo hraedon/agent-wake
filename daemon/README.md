@@ -390,6 +390,7 @@ Checks performed:
 |---|---|
 | `config_present` | config.json exists and its shape is valid |
 | `ingress_reachable` | daemon HTTP port responds |
+| `live_subscribers` | every source using live-only delivery has an eligible subscriber; unknown state is degraded |
 | `auth_configured` | at least one source has a secret (not open) |
 | `secrets_resolvable` | every source's signing secret is readable by whoever needs it |
 | `adapters_installed` | at least one adapter binary on PATH |

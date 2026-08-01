@@ -102,6 +102,27 @@ class TestSubscribe:
         r = Router(_config_with_routing())
         r.unsubscribe("nonexistent")
 
+    def test_subscriber_health_names_uncovered_live_only_sources(self):
+        r = Router(_config_with_routing())
+        conn = MockConnection()
+        r.subscribe("s1", "claude", "test", ["github-actions"], conn)
+
+        assert r.subscriber_health() == {
+            "connected": 1,
+            "by_source": {"github-actions": 1, "telegram-bot": 0, "unrouted": 0},
+            "live_only_sources": ["github-actions", "telegram-bot", "unrouted"],
+            "live_only_without_subscribers": ["telegram-bot", "unrouted"],
+        }
+
+    def test_subscriber_health_ignores_sources_with_durable_default(self):
+        cfg = _config_with_routing()
+        cfg["state"] = {"default_delivery": "next_session"}
+        r = Router(cfg)
+
+        summary = r.subscriber_health()
+        assert summary["live_only_sources"] == []
+        assert summary["live_only_without_subscribers"] == []
+
 
 # ── deliver / _resolve ───────────────────────────────────────────────
 

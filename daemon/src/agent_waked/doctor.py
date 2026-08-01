@@ -141,6 +141,43 @@ def _check_ingress_reachable() -> tuple[str, str]:
         return "warn", f"daemon HTTP probe error: {e}"
 
 
+def _check_live_subscribers() -> tuple[str, str]:
+    """Check that live-only sources have an eligible live subscriber."""
+    try:
+        cfg = load_config()
+    except Exception:
+        return "skip", "config not loadable; cannot determine subscriber requirements"
+
+    body, probe_error = _fetch_daemon_health(cfg)
+    if body is None:
+        return "warn", f"subscriber state unknown: {probe_error}"
+
+    subscribers = body.get("subscribers")
+    if not isinstance(subscribers, dict):
+        return "warn", (
+            "subscriber state unknown: daemon health document does not report "
+            "source-level subscriber state"
+        )
+
+    live_only = subscribers.get("live_only_sources")
+    missing = subscribers.get("live_only_without_subscribers")
+    by_source = subscribers.get("by_source")
+    if not isinstance(live_only, list) or not isinstance(missing, list) or not isinstance(
+        by_source, dict
+    ):
+        return "warn", "subscriber state unknown: daemon health document is incomplete"
+
+    if missing:
+        names = ", ".join(str(source) for source in missing)
+        return "warn", (
+            f"live_only sources without subscribers: {names}; wakes for these sources "
+            "will be dropped"
+        )
+    if live_only:
+        return "ok", f"{len(live_only)} live_only source(s) have subscribers"
+    return "skip", "no sources use live_only as the default delivery mode"
+
+
 def _check_auth_configured() -> tuple[str, str]:
     """Check: at least one source has a secret configured (auth is not open).
 
@@ -564,6 +601,7 @@ def run_checks() -> dict[str, Any]:
     for name, fn in [
         ("config_present", _check_config_file),
         ("ingress_reachable", _check_ingress_reachable),
+        ("live_subscribers", _check_live_subscribers),
         ("auth_configured", _check_auth_configured),
         ("secrets_resolvable", _check_secrets_resolvable),
         ("adapters_installed", _check_adapters_installed),

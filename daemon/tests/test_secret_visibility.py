@@ -100,6 +100,12 @@ def _healthy_health_doc(configured: int = 1) -> dict:
             "unresolved": [],
         },
         "adapters": 0,
+        "subscribers": {
+            "connected": configured,
+            "by_source": {"demo": configured},
+            "live_only_sources": ["demo"] if configured else [],
+            "live_only_without_subscribers": [],
+        },
     }
 
 
@@ -199,6 +205,13 @@ async def test_health_endpoint_reports_source_secret_state(monkeypatch):
         "configured": 1,
         "secrets_unresolved": 0,
         "unresolved": [],
+    }
+    assert body["status"] == "degraded"
+    assert body["subscribers"] == {
+        "connected": 0,
+        "by_source": {"demo": 0},
+        "live_only_sources": ["demo"],
+        "live_only_without_subscribers": ["demo"],
     }
     # No secret value, and no env-var name, on the unauthenticated port.
     raw = json.dumps(body)

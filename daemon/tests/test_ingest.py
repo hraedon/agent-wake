@@ -34,6 +34,14 @@ class MockRouter:
     def accepted_sources_for(self, adapter, requested):
         return requested
 
+    def subscriber_health(self):
+        return {
+            "connected": 1,
+            "by_source": {"test": 1, "other": 1},
+            "live_only_sources": ["other", "test"],
+            "live_only_without_subscribers": [],
+        }
+
     async def deliver(self, event):
         self.delivered.append(event)
         return self._result

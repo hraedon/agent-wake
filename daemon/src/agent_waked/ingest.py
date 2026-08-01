@@ -482,6 +482,10 @@ def create_ingest_app(
         # Counts and source names only; see secrets.visibility.health_summary for
         # why this stays safe on an unauthenticated port.
         body["sources"] = secret_visibility.health_summary(config)
+        subscriber_health = router.subscriber_health()
+        body["subscribers"] = subscriber_health
+        if subscriber_health["live_only_without_subscribers"]:
+            body["status"] = "degraded"
         if socket_server is not None:
             body["adapters"] = len(socket_server.connections)
         if delivery is not None:
