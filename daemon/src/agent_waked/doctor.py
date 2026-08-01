@@ -142,7 +142,24 @@ def _check_ingress_reachable() -> tuple[str, str]:
 
 
 def _check_live_subscribers() -> tuple[str, str]:
-    """Check that live-only sources have an eligible live subscriber."""
+    """Check that live-only sources have an eligible live subscriber.
+
+    The original WI-007 complaint was that doctor reported green while a
+    live_only wake silently dropped because nothing was subscribed. Three
+    things now follow from that:
+
+    * an uncovered live_only source is a **fail**, not a warn — wakes for it
+      *will* be dropped, so exit-code automation must see red. (Unknown state,
+      when the daemon cannot be asked, stays warn: "I cannot confirm" is not
+      "I confirmed a drop", per the WI-003 cry-wolf rule.)
+    * the detail distinguishes *no adapter connected at all* (no harness
+      session running, or the adapter is not loaded) from *adapters connected
+      but none serving this source* (a session is running but its adapter is
+      not subscribed — e.g. the channel was never loaded). That is the
+      distinction the live-estate evidence on mvmcc03 needed.
+    * adapter identity and count come from the health document so the operator
+      can see who is, and isn't, listening.
+    """
     try:
         cfg = load_config()
     except Exception:
@@ -169,9 +186,21 @@ def _check_live_subscribers() -> tuple[str, str]:
 
     if missing:
         names = ", ".join(str(source) for source in missing)
-        return "warn", (
-            f"live_only sources without subscribers: {names}; wakes for these sources "
-            "will be dropped"
+        connected = subscribers.get("connected", 0)
+        connected_adapters = subscribers.get("connected_adapters")
+        if connected and isinstance(connected_adapters, list) and connected_adapters:
+            who = ", ".join(str(a) for a in connected_adapters)
+            return "fail", (
+                f"live_only sources without subscribers: {names}; {connected} "
+                f"adapter(s) connected [{who}] but none serve these sources — a "
+                f"harness session may be running but its adapter is not subscribed "
+                f"(channel not loaded, or subscribe failed); wakes for these "
+                f"sources will be dropped"
+            )
+        return "fail", (
+            f"live_only sources without subscribers: {names}; no adapter is "
+            f"connected (no harness session running, or the adapter is not "
+            f"loaded/subscribed); wakes for these sources will be dropped"
         )
     if live_only:
         return "ok", f"{len(live_only)} live_only source(s) have subscribers"

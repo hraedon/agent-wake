@@ -102,7 +102,14 @@ def _healthy_health_doc(configured: int = 1) -> dict:
         "adapters": 0,
         "subscribers": {
             "connected": configured,
-            "by_source": {"demo": configured},
+            "connected_adapters": ["claude"] if configured else [],
+            "by_source": {
+                "demo": {
+                    "subscribers": configured,
+                    "adapters": ["claude"] if configured else [],
+                    "oldest_age_seconds": 0.0 if configured else None,
+                }
+            },
             "live_only_sources": ["demo"] if configured else [],
             "live_only_without_subscribers": [],
         },
@@ -209,7 +216,10 @@ async def test_health_endpoint_reports_source_secret_state(monkeypatch):
     assert body["status"] == "degraded"
     assert body["subscribers"] == {
         "connected": 0,
-        "by_source": {"demo": 0},
+        "connected_adapters": [],
+        "by_source": {
+            "demo": {"subscribers": 0, "adapters": [], "oldest_age_seconds": None}
+        },
         "live_only_sources": ["demo"],
         "live_only_without_subscribers": ["demo"],
     }

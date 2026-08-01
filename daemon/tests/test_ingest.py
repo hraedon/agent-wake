@@ -37,7 +37,11 @@ class MockRouter:
     def subscriber_health(self):
         return {
             "connected": 1,
-            "by_source": {"test": 1, "other": 1},
+            "connected_adapters": ["claude"],
+            "by_source": {
+                "test": {"subscribers": 1, "adapters": ["claude"], "oldest_age_seconds": 0.0},
+                "other": {"subscribers": 1, "adapters": ["claude"], "oldest_age_seconds": 0.0},
+            },
             "live_only_sources": ["other", "test"],
             "live_only_without_subscribers": [],
         }

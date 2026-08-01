@@ -102,17 +102,54 @@ class TestSubscribe:
         r = Router(_config_with_routing())
         r.unsubscribe("nonexistent")
 
-    def test_subscriber_health_names_uncovered_live_only_sources(self):
-        r = Router(_config_with_routing())
+    def test_subscriber_health_reports_adapters_and_coverage(self):
+        clock = [100.0]
+        r = Router(_config_with_routing(), clock=lambda: clock[0])
         conn = MockConnection()
         r.subscribe("s1", "claude", "test", ["github-actions"], conn)
 
         assert r.subscriber_health() == {
             "connected": 1,
-            "by_source": {"github-actions": 1, "telegram-bot": 0, "unrouted": 0},
+            "connected_adapters": ["claude"],
+            "by_source": {
+                "github-actions": {
+                    "subscribers": 1,
+                    "adapters": ["claude"],
+                    "oldest_age_seconds": 0.0,
+                },
+                "telegram-bot": {
+                    "subscribers": 0,
+                    "adapters": [],
+                    "oldest_age_seconds": None,
+                },
+                "unrouted": {
+                    "subscribers": 0,
+                    "adapters": [],
+                    "oldest_age_seconds": None,
+                },
+            },
             "live_only_sources": ["github-actions", "telegram-bot", "unrouted"],
             "live_only_without_subscribers": ["telegram-bot", "unrouted"],
         }
+
+    def test_subscriber_health_ages_and_lists_each_adapter(self):
+        clock = [100.0]
+        r = Router(_config_with_routing(), clock=lambda: clock[0])
+        r.subscribe("s1", "claude", "test", ["github-actions"], MockConnection())
+        clock[0] = 105.0
+        r.subscribe("s2", "opencode", "test", ["telegram-bot"], MockConnection("s2", "opencode"))
+        clock[0] = 107.0
+
+        health = r.subscriber_health()
+        github = health["by_source"]["github-actions"]
+        telegram = health["by_source"]["telegram-bot"]
+        # oldest subscriber for github-actions connected at t=100, now t=107.
+        assert github["oldest_age_seconds"] == 7.0
+        assert github["adapters"] == ["claude"]
+        # telegram-bot's opencode subscriber connected later, at t=105 -> age 2.0.
+        assert telegram["oldest_age_seconds"] == 2.0
+        assert telegram["adapters"] == ["opencode"]
+        assert sorted(health["connected_adapters"]) == ["claude", "opencode"]
 
     def test_subscriber_health_ignores_sources_with_durable_default(self):
         cfg = _config_with_routing()

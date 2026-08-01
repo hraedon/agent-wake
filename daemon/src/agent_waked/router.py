@@ -26,6 +26,7 @@ and not its siblings" is a property of the config rather than of adapter luck.
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -67,6 +68,7 @@ class _Subscriber:
 
     __slots__ = (
         "adapter",
+        "connected_at",
         "connection",
         "destinations",
         "in_flight",
@@ -83,6 +85,7 @@ class _Subscriber:
         sources: list[str],
         connection: ClientConnection,
         destinations: list[str] | None = None,
+        connected_at: float = 0.0,
     ):
         self.session_id = session_id
         self.adapter = adapter
@@ -94,12 +97,20 @@ class _Subscriber:
         #: nacked. The *delivery* lifecycle, which the heartbeat consults before
         #: reaping a connection for a missed pong (BC-011).
         self.in_flight = 0
+        self.connected_at = connected_at
 
 
 class Router:
-    def __init__(self, config: dict[str, Any], store: WakeStore | None = None):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        store: WakeStore | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self._config = config
         self._store = store
+        self._clock = clock
         self._subscribers: dict[str, _Subscriber] = {}
         self._order: list[str] = []
         self._pending_acks: dict[str, asyncio.Future[str]] = {}
@@ -450,7 +461,8 @@ class Router:
         destinations: list[str] | None = None,
     ) -> None:
         sub = _Subscriber(
-            session_id, adapter, instance, sources, connection, destinations
+            session_id, adapter, instance, sources, connection, destinations,
+            connected_at=self._clock(),
         )
         self._subscribers[session_id] = sub
         self._order.append(session_id)
@@ -687,24 +699,48 @@ An ack or nack decrements the subscriber's in-flight count, which is what
                 continue
             accepted.append(s)
         return accepted
+
+    def _subscribers_for_source(self, source: str) -> list[_Subscriber]:
+        """Distinct live subscribers serving any destination *source* reaches."""
+        found: dict[str, _Subscriber] = {}
+        for dest in addressing.routed_destinations(self._config, source):
+            sub = self._subscriber_for(dest)
+            if sub is not None:
+                found.setdefault(sub.session_id, sub)
+        return list(found.values())
+
     def subscriber_health(self) -> dict[str, Any]:
-        """Return source-level subscriber state for the health endpoint."""
+        """Return source-level subscriber state for the health endpoint.
+
+        ``by_source`` carries, per configured source, the live-subscriber
+        count, the adapter identities serving it and the age of the
+        longest-connected one — the three things WI-007 said a green doctor
+        must not paper over. Adapter names and a connection age (a duration,
+        not an identity) are safe on the unauthenticated port for the same
+        reason source names already are.
+        """
         sources = sorted(addressing.sender_table(self._config))
         default_delivery = (self._config.get("state") or {}).get(
             "default_delivery", _LIVE_ONLY
         )
         live_only_sources = sources if default_delivery == _LIVE_ONLY else []
-        by_source = {
-            source: sum(
-                1
-                for destination in addressing.routed_destinations(self._config, source)
-                if self._subscriber_for(destination) is not None
-            )
-            for source in sources
-        }
-        missing = [source for source in live_only_sources if by_source[source] == 0]
+        now = self._clock()
+        by_source: dict[str, Any] = {}
+        for source in sources:
+            subs = self._subscribers_for_source(source)
+            ages = [now - sub.connected_at for sub in subs]
+            by_source[source] = {
+                "subscribers": len(subs),
+                "adapters": sorted({sub.adapter for sub in subs}),
+                "oldest_age_seconds": max(ages) if ages else None,
+            }
+        missing = [
+            source for source in live_only_sources
+            if by_source[source]["subscribers"] == 0
+        ]
         return {
             "connected": len(self._subscribers),
+            "connected_adapters": sorted({sub.adapter for sub in self._subscribers.values()}),
             "by_source": by_source,
             "live_only_sources": live_only_sources,
             "live_only_without_subscribers": missing,
