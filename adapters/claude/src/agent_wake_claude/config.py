@@ -21,9 +21,9 @@ class ConfigError(Exception):
     pass
 
 
-def load_config() -> dict[str, Any]:
+def load_config(*, reload: bool = False) -> dict[str, Any]:
     global _cached_config
-    if _cached_config is not None:
+    if _cached_config is not None and not reload:
         return _cached_config
 
     config_path = os.environ.get("AGENT_WAKE_CONFIG")
@@ -81,3 +81,11 @@ def load_config() -> dict[str, Any]:
 
     _cached_config = config
     return config
+
+
+def reload_config() -> dict[str, Any]:
+    """Re-read config and environment-backed values, preserving cache on error."""
+    try:
+        return load_config(reload=True)
+    except (OSError, json.JSONDecodeError) as e:
+        raise ConfigError(f"Could not reload config: {e}") from e

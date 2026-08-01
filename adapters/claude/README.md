@@ -66,6 +66,11 @@ If the daemon is not running when the adapter starts, it logs a
 reconnect warning and retries with exponential backoff (1 s → 30 s cap).
 It does not crash.
 
+Send `SIGHUP` to the adapter process to reload permission-relay config and
+environment-backed signing values without restarting Claude Code. An invalid
+replacement is rejected and the last valid config remains active. Source
+subscriptions and `socket_path` changes still require an adapter restart.
+
 ## Send a test wake event
 
 With the daemon running:
