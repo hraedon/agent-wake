@@ -157,6 +157,50 @@ def test_rate_limit_buckets_are_independent_per_source():
 
 
 @pytest.mark.asyncio
+async def test_unsigned_flood_cannot_starve_signed_sender(monkeypatch):
+    """WI-008: an unsigned flood claiming a known source must not exhaust that
+    source's bucket and 429 a legitimate signed sender on a different peer.
+
+    Before the fix the pre-signature limiter was keyed on the (spoofable)
+    source header, so the attacker's bogus-signature requests charged the same
+    "test" bucket the signed sender uses; the signed sender would then be 429'd
+    by traffic it never sent. Now unsigned traffic is bounded by remote address
+    and only the verified sender identity keys the source bucket, so the flood
+    stays in the attacker's own per-peer bucket.
+    """
+    import agent_waked.ingest as ingest_mod
+
+    config = _config()
+    config["wake"] = {"ingest_rate_limit": 1.0, "ingest_rate_burst": 2}
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        peer = {"addr": "10.0.0.9"}
+        monkeypatch.setattr(ingest_mod, "_client_address", lambda request: peer["addr"])
+
+        flood_body = json.dumps({
+            "v": 0, "event_id": "flood", "source": "test", "kind": "alert",
+            "content": "x", "meta": {}, "wake": True,
+        }).encode()
+        for _ in range(4):
+            resp = await _make_request(cli, flood_body, source="test", sig="sha256=bad")
+            assert resp.status in (403, 429)
+
+        peer["addr"] = "10.0.0.10"
+        legit_body = json.dumps({
+            "v": 0, "event_id": "legit-1", "source": "test", "kind": "alert",
+            "content": "real", "meta": {}, "wake": True,
+        }).encode()
+        resp = await _make_request(cli, legit_body, source="test")
+        assert resp.status == 202, await resp.json()
+        assert (await resp.json())["status"] == "queued"
+    finally:
+        await cli.close()
+
+
+@pytest.mark.asyncio
 async def test_post_duplicate_event(client, router):
     body = json.dumps({
         "v": 0, "event_id": "evt-dup", "source": "test",

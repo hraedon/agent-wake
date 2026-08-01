@@ -207,8 +207,35 @@ def _json_response(status: int, payload: dict[str, Any]) -> web.Response:
     )
 
 
+def _rate_limited(retry_after: float) -> web.Response:
+    response = _json_response(429, {"error": "rate limit exceeded"})
+    response.headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
+    return response
+
+
+def _client_address(request: web.Request) -> str:
+    """Remote peer used to key the pre-signature rate bucket.
+
+    The transport peer, not an ``X-Forwarded-For`` value: that header is
+    client-supplied and only trustworthy behind a reverse proxy this daemon
+    controls. Default ingest binds loopback, so this is the direct caller; a
+    deployment that terminates TLS/proxy in front must keep the peer it sees
+    distinct per origin for the per-peer bound to mean what it says.
+    """
+    return request.remote or "unknown"
+
+
 class SourceRateLimiter:
-    """In-process token buckets keyed by configured source or client address."""
+    """In-process token buckets keyed by remote address, then by source.
+
+    A request is charged twice against the same bucket set: once by client
+    address before the HMAC verifies (so an unsigned flood cannot exhaust a
+    bucket keyed on the spoofable source header and starve the signed sender,
+    WI-008), and once by source after verification (the per-source cap on
+    authenticated traffic). Anonymous floods stay in their own per-peer
+    buckets and never touch a source bucket, which is what keeps the estate's
+    own signed sender from being 429'd by traffic it did not send.
+    """
 
     def __init__(
         self,
@@ -323,13 +350,17 @@ def create_ingest_app(
         signature = request.headers.get("X-AgentWake-Signature", "")
         event_id_header = request.headers.get("X-AgentWake-Event-Id")
 
+        # Pre-signature rate limit, keyed by remote address. The source header
+        # is spoofable, so a flood of unsigned requests claiming a known source
+        # must not be allowed to exhaust that source's bucket and 429-starve
+        # the estate's own signed sender (WI-008). Per-peer bounding keeps each
+        # flooding origin in its own bucket; the trusted sender identity keys
+        # its own bucket only after the HMAC verifies below.
+        peer_allowed, peer_retry = rate_limiter.allow(_client_address(request))
+        if not peer_allowed:
+            return _rate_limited(peer_retry)
+
         source_cfg = config.get("sources", {}).get(source)
-        rate_identifier = source if source_cfg else (request.remote or "unknown")
-        allowed, retry_after = rate_limiter.allow(rate_identifier)
-        if not allowed:
-            rate_response = _json_response(429, {"error": "rate limit exceeded"})
-            rate_response.headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
-            return rate_response
         if not source_cfg:
             return _json_response(
                 403, {"error": "unknown source or invalid signature"}
@@ -352,6 +383,15 @@ def create_ingest_app(
             return _json_response(
                 403, {"error": "unknown source or invalid signature"}
             )
+
+        # Post-signature rate limit, keyed by the now-authenticated sender. The
+        # HMAC has verified, so ``source`` is a trusted identity rather than a
+        # spoofable header and is the right key for the per-source bucket. An
+        # unsigned flood can only ever reach the peer bucket above, so this one
+        # stays clean for the real sender.
+        source_allowed, source_retry = rate_limiter.allow(source)
+        if not source_allowed:
+            return _rate_limited(source_retry)
 
         # Identity gating: check sender identity against source allowlist.
         sender_identity = request.headers.get("X-AgentWake-Identity")
