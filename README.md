@@ -49,6 +49,8 @@ contracts:
 
 ## Quick start
 
+For the shortest end-to-end path, follow [First wake in two minutes](docs/quickstart.md).
+
 ### 1. Install and start the daemon
 
 ```bash
