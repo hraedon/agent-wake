@@ -89,6 +89,9 @@ class _MockRouter:
     async def deliver(self, event):
         return "queued"
 
+    async def shutdown(self) -> None:
+        return None
+
 
 class _FakeSocketServer:
     def close(self) -> None:
@@ -151,9 +154,10 @@ async def _run_shutdown_race(
         config, resolver, channels={"webhook": channel}, store=store
     )
 
+    router = _MockRouter()
     app = create_ingest_app(
         config,
-        _MockRouter(),
+        router,
         resolver=resolver,
         delivery=delivery,
         store=store,
@@ -191,6 +195,7 @@ async def _run_shutdown_race(
         await main_module._shutdown(
             socket_server=_FakeSocketServer(),  # type: ignore[arg-type]
             runner=runner,
+            router=router,  # type: ignore[arg-type]
             outbox=_FakeOutbox(),  # type: ignore[arg-type]
             delivery=delivery,
             store=store,

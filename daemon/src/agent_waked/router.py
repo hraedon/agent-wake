@@ -122,6 +122,20 @@ class Router:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    async def shutdown(self) -> None:
+        """Cancel and await every ack waiter after ingress has stopped."""
+        tasks = tuple(self._background_tasks)
+        if tasks:
+            log.info("draining %d ack waiter task(s)", len(tasks))
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for future in self._pending_acks.values():
+            if not future.done():
+                future.cancel()
+        self._pending_acks.clear()
+        self._background_tasks.clear()
+
     # ── addressing ───────────────────────────────────────────────────────────
 
     def destinations_for_hello(

@@ -123,6 +123,21 @@ class TestSubscribe:
         assert summary["live_only_sources"] == []
         assert summary["live_only_without_subscribers"] == []
 
+    @pytest.mark.asyncio
+    async def test_shutdown_drains_ack_waiters(self):
+        r = Router(_config_legacy())
+        conn = MockConnection("s1", "claude", ["github-actions"])
+        r.subscribe("s1", "claude", "test", ["github-actions"], conn)
+
+        assert await r.deliver({"source": "github-actions", "event_id": "e1"}) == "queued"
+        assert r._background_tasks
+        assert r._pending_acks
+
+        await r.shutdown()
+
+        assert r._background_tasks == set()
+        assert r._pending_acks == {}
+
 
 # ── deliver / _resolve ───────────────────────────────────────────────
 

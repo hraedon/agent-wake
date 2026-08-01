@@ -126,6 +126,14 @@ class _FakeRunner:
             await asyncio.sleep(30)
 
 
+class _FakeRouter:
+    def __init__(self, rec):
+        self._rec = rec
+
+    async def shutdown(self):
+        self._rec.order.append("router.shutdown")
+
+
 class _FakeOutbox:
     def __init__(self, rec):
         self._rec = rec
@@ -154,6 +162,7 @@ async def _run_shutdown(rec, **overrides):
     kwargs = {
         "socket_server": _FakeSocketServer(rec),
         "runner": _FakeRunner(rec),
+        "router": _FakeRouter(rec),
         "outbox": _FakeOutbox(rec),
         "delivery": _FakeDelivery(rec),
         "store": _FakeStore(rec),
@@ -175,6 +184,7 @@ async def test_store_is_closed_after_the_http_runner_is_drained():
     assert rec.order == [
         "socket_server.close",
         "runner.cleanup",
+        "router.shutdown",
         "outbox.close",
         "delivery.close",
         "store.close",
