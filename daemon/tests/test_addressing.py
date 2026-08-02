@@ -426,6 +426,11 @@ async def test_queued_event_drains_only_to_its_own_session(tmp_path):
         await asyncio.sleep(0)
         assert conn_a.destination_names == ["dev-a"]
         assert conn_a.sessions == ["sess-a"]
+        # The recording connection acks on send, but deleting the claimed row
+        # runs in a background ack-waiter task. Await it, or the queue-state
+        # assertion below races the settlement (a single sleep(0) is not
+        # enough on CPython 3.11, where wait_for needs several loop turns).
+        await asyncio.gather(*tuple(router._background_tasks))
         assert store.pending_count() == 0
     finally:
         store.close()
@@ -494,7 +499,10 @@ async def test_router_tracks_in_flight_deliveries_for_the_heartbeat():
 
     ack_id = conn.sent[0]["ack_id"]
     router.resolve_ack(ack_id, "ack")
-    await asyncio.sleep(0)
+    # The in-flight decrement happens in the background ack-waiter task, not
+    # synchronously in resolve_ack; await it (one sleep(0) is not enough on
+    # CPython 3.11, where wait_for needs several loop turns).
+    await asyncio.gather(*tuple(router._background_tasks))
     assert router.in_flight_for("s1") == 0
 
 
