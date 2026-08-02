@@ -430,6 +430,7 @@ async def _run() -> int:
     await _shutdown(
         socket_server=socket_server,
         runner=runner,
+        router=router,
         outbox=outbox,
         delivery=delivery,
         store=store,
@@ -454,6 +455,7 @@ async def _shutdown(
     *,
     socket_server: SocketServer,
     runner: web.AppRunner,
+    router: Router,
     outbox: Outbox,
     delivery: HumanDelivery,
     store: WakeStore | None,
@@ -479,8 +481,10 @@ async def _shutdown(
        hook never ran to completion and tasks can still be alive. Cancelling
        them *here*, before the store closes, is what makes "nothing can still
        want the store" true rather than merely likely.
-    4. Close the outbound HTTP sessions, once nothing is using them.
-    5. Close the store LAST.
+    4. Cancel and await ack waiters while their durable-state callbacks can still
+       use the store.
+    5. Close the outbound HTTP sessions, once nothing is using them.
+    6. Close the store LAST.
     """
     socket_server.close()
     try:
@@ -489,6 +493,7 @@ async def _shutdown(
         log.warning("runner cleanup timed out after %.0fs", _DRAIN_TIMEOUT)
     if app is not None:
         await force_drain_delivery_tasks(app)
+    await router.shutdown()
     await outbox.close()
     await delivery.close()
     if store is not None:

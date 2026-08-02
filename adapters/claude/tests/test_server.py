@@ -2,6 +2,7 @@ import sys
 import json
 import io
 import threading
+import time
 
 from agent_wake_claude.server import handle
 from agent_wake_claude.reply import get_tool_definition, handle_reply_tool_call
@@ -66,12 +67,60 @@ def test_unhandled_exception_in_handler_returns_jsonrpc_internal_error():
             "params": {"name": "agent_wake_reply", "arguments": {}},
         }
         srv.handle(msg)
+        deadline = time.monotonic() + 1
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert len(captured) == 1, captured
         resp = captured[0]
         assert resp.get("id") == 99
         assert "error" in resp
         assert resp["error"]["code"] == -32603
     finally:
+        srv.send = orig_send
+        srv.handle_reply_tool_call = orig_reply_handler
+
+
+def test_reply_tool_does_not_block_other_mcp_messages():
+    import agent_wake_claude.server as srv
+
+    captured = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_send(msg):
+        captured.append(msg)
+
+    def slow_reply(_args):
+        started.set()
+        release.wait(timeout=1)
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    orig_send = srv.send
+    orig_reply_handler = srv.handle_reply_tool_call
+    srv.send = fake_send
+    srv.handle_reply_tool_call = slow_reply
+    try:
+        before = time.monotonic()
+        srv.handle({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {"name": "agent_wake_reply", "arguments": {}},
+        })
+        elapsed = time.monotonic() - before
+
+        assert elapsed < 0.2
+        assert started.wait(timeout=0.2)
+        srv.handle({"jsonrpc": "2.0", "id": 11, "method": "tools/list", "params": {}})
+        assert any(message.get("id") == 11 for message in captured)
+
+        release.set()
+        deadline = time.monotonic() + 1
+        while not any(message.get("id") == 10 for message in captured):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        release.set()
         srv.send = orig_send
         srv.handle_reply_tool_call = orig_reply_handler
 

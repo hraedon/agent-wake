@@ -348,6 +348,82 @@ def test_state_block_rejects_bad_delivery_mode(tmp_path, monkeypatch):
         load_config()
 
 
+def test_wake_hmac_secret_accepts_rotation_list(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"hmac_secret": ["current", "previous"]},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    assert load_config()["wake"]["hmac_secret"] == ["current", "previous"]
+
+
+def test_wake_hmac_secret_rejects_empty_key_list(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"hmac_secret": []},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    with pytest.raises(ConfigError, match=r"wake\.hmac_secret"):
+        load_config()
+
+
+def test_wake_rate_limit_defaults_are_applied(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    assert load_config()["wake"] == {
+        "ingest_rate_limit": 10.0,
+        "ingest_rate_burst": 20,
+    }
+
+
+def test_wake_rate_limit_values_are_normalised(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"ingest_rate_limit": 2, "ingest_rate_burst": 3},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    assert load_config()["wake"] == {
+        "ingest_rate_limit": 2.0,
+        "ingest_rate_burst": 3,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ingest_rate_limit", 0),
+        ("ingest_rate_limit", True),
+        ("ingest_rate_burst", 0),
+        ("ingest_rate_burst", 1.5),
+    ],
+)
+def test_wake_rate_limit_rejects_invalid_values(tmp_path, monkeypatch, field, value):
+    cfg_path = tmp_path / "config.json"
+    _write_config(cfg_path, {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {field: value},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(cfg_path))
+
+    with pytest.raises(ConfigError, match=field):
+        load_config()
+
+
 def test_state_block_rejects_non_positive_retention(tmp_path, monkeypatch):
     _state_cfg(tmp_path, monkeypatch, {"dedupe_max_rows": 0})
     with pytest.raises(ConfigError, match="must be a positive integer"):

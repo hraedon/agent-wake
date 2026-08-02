@@ -66,6 +66,7 @@ def test_doctor_checks_all_present(cfg_with_secret):
     check_names = [c["name"] for c in report["checks"]]
     assert "config_present" in check_names
     assert "ingress_reachable" in check_names
+    assert "live_subscribers" in check_names
     assert "auth_configured" in check_names
     assert "adapters_installed" in check_names
     assert "allowlist_present" in check_names
@@ -154,6 +155,101 @@ def test_degraded_when_warnings_present(cfg_with_secret):
     assert ingress["status"] == "warn"
     assert report["degraded"] is True
     assert report["ok"] is True
+
+
+def test_live_subscribers_warns_when_daemon_state_unknown(cfg_with_secret):
+    from agent_waked.doctor import _check_live_subscribers
+
+    with patch(
+        "agent_waked.doctor._fetch_daemon_health",
+        return_value=({"status": "ok"}, ""),
+    ):
+        status, detail = _check_live_subscribers()
+
+    assert status == "warn"
+    assert "subscriber state unknown" in detail
+
+
+def test_live_subscribers_fails_when_live_only_source_is_uncovered(cfg_with_secret):
+    from agent_waked.doctor import _check_live_subscribers
+
+    health = {
+        "subscribers": {
+            "connected": 0,
+            "connected_adapters": [],
+            "by_source": {"demo": {"subscribers": 0, "adapters": [], "oldest_age_seconds": None}},
+            "live_only_sources": ["demo"],
+            "live_only_without_subscribers": ["demo"],
+        }
+    }
+    with patch("agent_waked.doctor._fetch_daemon_health", return_value=(health, "")):
+        status, detail = _check_live_subscribers()
+
+    assert status == "fail"
+    assert "demo" in detail
+    assert "will be dropped" in detail
+    assert "no adapter is connected" in detail
+
+
+def test_live_subscribers_fail_names_connected_adapter_not_subscribed(cfg_with_secret):
+    from agent_waked.doctor import _check_live_subscribers
+
+    health = {
+        "subscribers": {
+            "connected": 1,
+            "connected_adapters": ["claude"],
+            "by_source": {"demo": {"subscribers": 0, "adapters": [], "oldest_age_seconds": None}},
+            "live_only_sources": ["demo"],
+            "live_only_without_subscribers": ["demo"],
+        }
+    }
+    with patch("agent_waked.doctor._fetch_daemon_health", return_value=(health, "")):
+        status, detail = _check_live_subscribers()
+
+    assert status == "fail"
+    assert "claude" in detail
+    assert "none serve these sources" in detail
+    assert "not subscribed" in detail
+
+
+def test_live_subscribers_ok_flips_report_ok_false_when_uncovered(cfg_with_secret):
+    health = {
+        "subscribers": {
+            "connected": 0,
+            "connected_adapters": [],
+            "by_source": {"demo": {"subscribers": 0, "adapters": [], "oldest_age_seconds": None}},
+            "live_only_sources": ["demo"],
+            "live_only_without_subscribers": ["demo"],
+        }
+    }
+    with patch("agent_waked.doctor._fetch_daemon_health", return_value=(health, "")):
+        report = run_checks()
+
+    live = next(c for c in report["checks"] if c["name"] == "live_subscribers")
+    assert live["status"] == "fail"
+    assert report["ok"] is False
+    assert report["degraded"] is False
+
+
+def test_live_subscribers_ok_when_live_only_source_is_covered(cfg_with_secret):
+    from agent_waked.doctor import _check_live_subscribers
+
+    health = {
+        "subscribers": {
+            "connected": 1,
+            "connected_adapters": ["claude"],
+            "by_source": {
+                "demo": {"subscribers": 1, "adapters": ["claude"], "oldest_age_seconds": 4.0}
+            },
+            "live_only_sources": ["demo"],
+            "live_only_without_subscribers": [],
+        }
+    }
+    with patch("agent_waked.doctor._fetch_daemon_health", return_value=(health, "")):
+        status, detail = _check_live_subscribers()
+
+    assert status == "ok"
+    assert "1 live_only source" in detail
 
 
 # ── format_text ────────────────────────────────────────────────────────────────

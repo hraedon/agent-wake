@@ -1,5 +1,6 @@
-import time
+import json
 import threading
+import time
 
 import agent_wake_claude.config as cm
 from agent_wake_claude.permission import (
@@ -8,6 +9,7 @@ from agent_wake_claude.permission import (
     _pending,
     _lock,
     _PENDING_TTL_SECONDS,
+    verify_permission_body,
 )
 
 
@@ -119,3 +121,59 @@ def test_eviction_on_verdict():
     finally:
         _clear_pending()
         _clear_mock_config()
+
+
+def test_permission_request_uses_dedicated_hmac_key(monkeypatch):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read(self):
+            return b""
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        assert timeout == 30
+        return Response()
+
+    monkeypatch.setattr("agent_wake_claude.permission.urllib.request.urlopen", urlopen)
+    monkeypatch.setenv("WAKE_HMAC_SECRET", "current,previous")
+    cm._cached_config = {
+        "sources": {"demo": {}},
+        "default_callback_url": "https://callback.example/permission",
+        "wake": {},
+    }
+    _clear_pending()
+    try:
+        handle_permission_request({
+            "request_id": "signed01",
+            "tool_name": "Bash",
+            "tool_input": "true",
+            "session_id": "sess1",
+        })
+
+        request = requests[0]
+        body = request.data
+        headers = {name.lower(): value for name, value in request.header_items()}
+        assert json.loads(body)["request_id"] == "signed01"
+        assert verify_permission_body(
+            body,
+            headers["x-wake-signature"],
+            config=cm._cached_config,
+        )
+    finally:
+        _clear_pending()
+        _clear_mock_config()
+
+
+def test_permission_receiver_missing_header_behavior(monkeypatch):
+    monkeypatch.delenv("WAKE_HMAC_SECRET", raising=False)
+    config = {"wake": {}}
+
+    assert not verify_permission_body(b"body", None, config=config, require_auth=True)
+    assert verify_permission_body(b"body", None, config=config, require_auth=False)

@@ -9,7 +9,7 @@ import logging
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from agent_waked.ingest import create_ingest_app
+from agent_waked.ingest import SourceRateLimiter, create_ingest_app
 
 
 def _hmac(secret: bytes, body: bytes) -> str:
@@ -33,6 +33,18 @@ class MockRouter:
 
     def accepted_sources_for(self, adapter, requested):
         return requested
+
+    def subscriber_health(self):
+        return {
+            "connected": 1,
+            "connected_adapters": ["claude"],
+            "by_source": {
+                "test": {"subscribers": 1, "adapters": ["claude"], "oldest_age_seconds": 0.0},
+                "other": {"subscribers": 1, "adapters": ["claude"], "oldest_age_seconds": 0.0},
+            },
+            "live_only_sources": ["other", "test"],
+            "live_only_without_subscribers": [],
+        }
 
     async def deliver(self, event):
         self.delivered.append(event)
@@ -87,6 +99,109 @@ async def test_post_v0_event_queued(client, router):
     assert data["event_id"] == "evt-001"
     assert len(router.delivered) == 1
     assert router.delivered[0]["content"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_per_source_rate_limit_returns_429_with_retry_after():
+    config = _config()
+    config["wake"] = {"ingest_rate_limit": 1.0, "ingest_rate_burst": 1}
+    router = MockRouter()
+    cli = TestClient(TestServer(create_ingest_app(config, router)))
+    await cli.start_server()
+    try:
+        first_body = json.dumps({
+            "v": 0,
+            "event_id": "rate-1",
+            "source": "test",
+            "kind": "alert",
+            "content": "first",
+            "meta": {},
+            "wake": True,
+        }).encode()
+        second_body = json.dumps({
+            "v": 0,
+            "event_id": "rate-2",
+            "source": "test",
+            "kind": "alert",
+            "content": "second",
+            "meta": {},
+            "wake": True,
+        }).encode()
+
+        first = await _make_request(cli, first_body)
+        second = await _make_request(cli, second_body)
+
+        assert first.status == 202
+        assert second.status == 429
+        assert int(second.headers["Retry-After"]) >= 1
+        assert await second.json() == {"error": "rate limit exceeded"}
+    finally:
+        await cli.close()
+
+
+def test_rate_limit_bucket_refills_over_time():
+    now = [0.0]
+    limiter = SourceRateLimiter(2.0, 1, clock=lambda: now[0])
+
+    assert limiter.allow("source-a") == (True, 0.0)
+    allowed, retry_after = limiter.allow("source-a")
+    assert allowed is False
+    assert retry_after == pytest.approx(0.5)
+
+    now[0] = 0.5
+    assert limiter.allow("source-a") == (True, 0.0)
+
+
+def test_rate_limit_buckets_are_independent_per_source():
+    limiter = SourceRateLimiter(1.0, 1, clock=lambda: 0.0)
+
+    assert limiter.allow("source-a")[0] is True
+    assert limiter.allow("source-a")[0] is False
+    assert limiter.allow("source-b")[0] is True
+
+
+@pytest.mark.asyncio
+async def test_unsigned_flood_cannot_starve_signed_sender(monkeypatch):
+    """WI-008: an unsigned flood claiming a known source must not exhaust that
+    source's bucket and 429 a legitimate signed sender on a different peer.
+
+    Before the fix the pre-signature limiter was keyed on the (spoofable)
+    source header, so the attacker's bogus-signature requests charged the same
+    "test" bucket the signed sender uses; the signed sender would then be 429'd
+    by traffic it never sent. Now unsigned traffic is bounded by remote address
+    and only the verified sender identity keys the source bucket, so the flood
+    stays in the attacker's own per-peer bucket.
+    """
+    import agent_waked.ingest as ingest_mod
+
+    config = _config()
+    config["wake"] = {"ingest_rate_limit": 1.0, "ingest_rate_burst": 2}
+    router = MockRouter()
+    app = create_ingest_app(config, router)
+    cli = TestClient(TestServer(app))
+    await cli.start_server()
+    try:
+        peer = {"addr": "10.0.0.9"}
+        monkeypatch.setattr(ingest_mod, "_client_address", lambda request: peer["addr"])
+
+        flood_body = json.dumps({
+            "v": 0, "event_id": "flood", "source": "test", "kind": "alert",
+            "content": "x", "meta": {}, "wake": True,
+        }).encode()
+        for _ in range(4):
+            resp = await _make_request(cli, flood_body, source="test", sig="sha256=bad")
+            assert resp.status in (403, 429)
+
+        peer["addr"] = "10.0.0.10"
+        legit_body = json.dumps({
+            "v": 0, "event_id": "legit-1", "source": "test", "kind": "alert",
+            "content": "real", "meta": {}, "wake": True,
+        }).encode()
+        resp = await _make_request(cli, legit_body, source="test")
+        assert resp.status == 202, await resp.json()
+        assert (await resp.json())["status"] == "queued"
+    finally:
+        await cli.close()
 
 
 @pytest.mark.asyncio

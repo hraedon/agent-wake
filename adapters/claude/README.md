@@ -66,6 +66,11 @@ If the daemon is not running when the adapter starts, it logs a
 reconnect warning and retries with exponential backoff (1 s → 30 s cap).
 It does not crash.
 
+Send `SIGHUP` to the adapter process to reload permission-relay config and
+environment-backed signing values without restarting Claude Code. An invalid
+replacement is rejected and the last valid config remains active. Source
+subscriptions and `socket_path` changes still require an adapter restart.
+
 ## Send a test wake event
 
 With the daemon running:
@@ -122,7 +127,9 @@ green-path message.
 ## Permission relay
 
 The adapter forwards Claude Code `notifications/claude/channel/permission_request`
-to the `default_callback_url`.
+to the `default_callback_url`. When `WAKE_HMAC_SECRET` is configured, requests
+are signed using the shared [callback HMAC contract](../../docs/hmac-signing.md).
+Ingress source secrets are not used for permission signing.
 
 ## Test
 

@@ -10,6 +10,7 @@ All replies to the client go through _notify.send for thread-safe stdout writing
 
 import json
 import sys
+import threading
 from typing import Any
 
 from ._notify import send
@@ -46,6 +47,13 @@ def _reply(req_id: Any, result: dict[str, Any]) -> None:
 
 def _error(req_id: Any, code: int, message: str) -> None:
     send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
+
+
+def _run_reply_tool(req_id: Any, args: dict[str, Any]) -> None:
+    try:
+        _reply(req_id, handle_reply_tool_call(args))
+    except Exception as e:
+        _error(req_id, -32603, f"tool error: {e}")
 
 
 def handle(msg: dict[str, Any]) -> None:
@@ -88,15 +96,15 @@ def handle(msg: dict[str, Any]) -> None:
         flush_silent_events("tools_call")
         name = params.get("name")
         args = params.get("arguments") or {}
-        try:
-            if name == "agent_wake_reply":
-                result = handle_reply_tool_call(args)
-            else:
-                _error(req_id, -32601, f"unknown tool: {name}")
-                return
-            _reply(req_id, result)
-        except Exception as e:
-            _error(req_id, -32603, f"tool error: {e}")
+        if name != "agent_wake_reply":
+            _error(req_id, -32601, f"unknown tool: {name}")
+            return
+        threading.Thread(
+            target=_run_reply_tool,
+            args=(req_id, args),
+            name=f"agent-wake-reply-{req_id}",
+            daemon=True,
+        ).start()
         return
 
     if method == "notifications/claude/channel/permission_request":

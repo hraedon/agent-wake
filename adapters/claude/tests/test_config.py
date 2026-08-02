@@ -93,3 +93,49 @@ def test_load_config_no_sources(monkeypatch):
         importlib.reload(config_mod)
         with pytest.raises(config_mod.ConfigError):
             config_mod.load_config()
+
+
+def test_reload_config_refreshes_environment_secret(monkeypatch, tmp_path):
+    path = tmp_path / "config.json"
+    _write_config(str(path), {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(path))
+    monkeypatch.setenv("DEMO_SECRET", "first")
+    config_mod._cached_config = None
+
+    assert config_mod.load_config()["sources"]["demo"]["secret"] == b"first"
+    monkeypatch.setenv("DEMO_SECRET", "second")
+    assert config_mod.load_config()["sources"]["demo"]["secret"] == b"first"
+    assert config_mod.reload_config()["sources"]["demo"]["secret"] == b"second"
+
+
+def test_failed_reload_preserves_last_valid_config(monkeypatch, tmp_path):
+    path = tmp_path / "config.json"
+    _write_config(str(path), {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(path))
+    config_mod._cached_config = None
+    original = config_mod.load_config()
+    path.write_text("not json")
+
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.reload_config()
+
+    assert config_mod.load_config() is original
+
+
+def test_load_config_preserves_wake_hmac_rotation_list(monkeypatch, tmp_path):
+    path = tmp_path / "config.json"
+    _write_config(str(path), {
+        "version": 1,
+        "sources": {"demo": {"secret_env": "DEMO_SECRET"}},
+        "wake": {"hmac_secret": ["current", "previous"]},
+    })
+    monkeypatch.setenv("AGENT_WAKE_CONFIG", str(path))
+    config_mod._cached_config = None
+
+    assert config_mod.load_config()["wake"]["hmac_secret"] == ["current", "previous"]

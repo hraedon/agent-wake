@@ -14,7 +14,7 @@ import sys
 import threading
 
 from .client import run_client
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, reload_config
 from .server import main as server_main
 
 logger = logging.getLogger("agent_wake_claude")
@@ -34,6 +34,10 @@ def main() -> None:
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, client_task.cancel)
+    try:
+        loop.add_signal_handler(signal.SIGHUP, _reload_config)
+    except (AttributeError, NotImplementedError, OSError):
+        pass
 
     mcp_thread = threading.Thread(target=server_main, daemon=True)
     mcp_thread.start()
@@ -44,6 +48,15 @@ def main() -> None:
         pass
     finally:
         loop.close()
+
+
+def _reload_config() -> None:
+    try:
+        reload_config()
+    except ConfigError as e:
+        logger.error("config reload failed: %s", e)
+    else:
+        logger.info("config reloaded")
 
 
 if __name__ == "__main__":

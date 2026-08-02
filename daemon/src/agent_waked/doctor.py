@@ -141,6 +141,72 @@ def _check_ingress_reachable() -> tuple[str, str]:
         return "warn", f"daemon HTTP probe error: {e}"
 
 
+def _check_live_subscribers() -> tuple[str, str]:
+    """Check that live-only sources have an eligible live subscriber.
+
+    The original WI-007 complaint was that doctor reported green while a
+    live_only wake silently dropped because nothing was subscribed. Three
+    things now follow from that:
+
+    * an uncovered live_only source is a **fail**, not a warn — wakes for it
+      *will* be dropped, so exit-code automation must see red. (Unknown state,
+      when the daemon cannot be asked, stays warn: "I cannot confirm" is not
+      "I confirmed a drop", per the WI-003 cry-wolf rule.)
+    * the detail distinguishes *no adapter connected at all* (no harness
+      session running, or the adapter is not loaded) from *adapters connected
+      but none serving this source* (a session is running but its adapter is
+      not subscribed — e.g. the channel was never loaded). That is the
+      distinction the live-estate evidence on mvmcc03 needed.
+    * adapter identity and count come from the health document so the operator
+      can see who is, and isn't, listening.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return "skip", "config not loadable; cannot determine subscriber requirements"
+
+    body, probe_error = _fetch_daemon_health(cfg)
+    if body is None:
+        return "warn", f"subscriber state unknown: {probe_error}"
+
+    subscribers = body.get("subscribers")
+    if not isinstance(subscribers, dict):
+        return "warn", (
+            "subscriber state unknown: daemon health document does not report "
+            "source-level subscriber state"
+        )
+
+    live_only = subscribers.get("live_only_sources")
+    missing = subscribers.get("live_only_without_subscribers")
+    by_source = subscribers.get("by_source")
+    if not isinstance(live_only, list) or not isinstance(missing, list) or not isinstance(
+        by_source, dict
+    ):
+        return "warn", "subscriber state unknown: daemon health document is incomplete"
+
+    if missing:
+        names = ", ".join(str(source) for source in missing)
+        connected = subscribers.get("connected", 0)
+        connected_adapters = subscribers.get("connected_adapters")
+        if connected and isinstance(connected_adapters, list) and connected_adapters:
+            who = ", ".join(str(a) for a in connected_adapters)
+            return "fail", (
+                f"live_only sources without subscribers: {names}; {connected} "
+                f"adapter(s) connected [{who}] but none serve these sources — a "
+                f"harness session may be running but its adapter is not subscribed "
+                f"(channel not loaded, or subscribe failed); wakes for these "
+                f"sources will be dropped"
+            )
+        return "fail", (
+            f"live_only sources without subscribers: {names}; no adapter is "
+            f"connected (no harness session running, or the adapter is not "
+            f"loaded/subscribed); wakes for these sources will be dropped"
+        )
+    if live_only:
+        return "ok", f"{len(live_only)} live_only source(s) have subscribers"
+    return "skip", "no sources use live_only as the default delivery mode"
+
+
 def _check_auth_configured() -> tuple[str, str]:
     """Check: at least one source has a secret configured (auth is not open).
 
@@ -564,6 +630,7 @@ def run_checks() -> dict[str, Any]:
     for name, fn in [
         ("config_present", _check_config_file),
         ("ingress_reachable", _check_ingress_reachable),
+        ("live_subscribers", _check_live_subscribers),
         ("auth_configured", _check_auth_configured),
         ("secrets_resolvable", _check_secrets_resolvable),
         ("adapters_installed", _check_adapters_installed),

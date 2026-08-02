@@ -61,6 +61,9 @@ _VALID_SCHEMES = {"env", "vault"}
 
 _VALID_CHANNEL_KINDS = {"webhook", "email"}
 
+DEFAULT_INGEST_RATE_LIMIT = 10.0
+DEFAULT_INGEST_RATE_BURST = 20
+
 #: Highest config format this build understands.
 CURRENT_CONFIG_VERSION = 2
 
@@ -99,6 +102,39 @@ def _parse_uri(uri: str, source_name: str) -> str:
 
 def _has_vault_uri(uris: list[str]) -> bool:
     return any(u.startswith("vault://") for u in uris)
+
+
+def _validate_wake_block(raw: object) -> dict[str, Any]:
+    if raw is None:
+        return {
+            "ingest_rate_limit": DEFAULT_INGEST_RATE_LIMIT,
+            "ingest_rate_burst": DEFAULT_INGEST_RATE_BURST,
+        }
+    if not isinstance(raw, dict):
+        raise ConfigError("'wake' must be an object.")
+    result: dict[str, Any] = {
+        "ingest_rate_limit": DEFAULT_INGEST_RATE_LIMIT,
+        "ingest_rate_burst": DEFAULT_INGEST_RATE_BURST,
+    }
+    hmac_secret = raw.get("hmac_secret")
+    if hmac_secret is not None:
+        values = [hmac_secret] if isinstance(hmac_secret, str) else hmac_secret
+        if not isinstance(values, list) or not values:
+            raise ConfigError("'wake.hmac_secret' must be a string or non-empty list.")
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ConfigError("'wake.hmac_secret' entries must be non-empty strings.")
+        if not any(part.strip() for value in values for part in value.split(",")):
+            raise ConfigError("'wake.hmac_secret' must contain at least one key.")
+        result["hmac_secret"] = hmac_secret
+    rate = raw.get("ingest_rate_limit", DEFAULT_INGEST_RATE_LIMIT)
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate <= 0:
+        raise ConfigError("'wake.ingest_rate_limit' must be a positive number.")
+    burst = raw.get("ingest_rate_burst", DEFAULT_INGEST_RATE_BURST)
+    if isinstance(burst, bool) or not isinstance(burst, int) or burst <= 0:
+        raise ConfigError("'wake.ingest_rate_burst' must be a positive integer.")
+    result["ingest_rate_limit"] = float(rate)
+    result["ingest_rate_burst"] = burst
+    return result
 
 
 def load_config() -> dict[str, Any]:
@@ -187,6 +223,7 @@ def load_config() -> dict[str, Any]:
         "routing": routing,
         "vault": vault_cfg,
         "state": _validate_state_block(raw.get("state")),
+        "wake": _validate_wake_block(raw.get("wake")),
     }
     # ``sources`` is the same object as ``senders``, not a copy: an alias that
     # can drift is worse than no alias, because half the daemon would then

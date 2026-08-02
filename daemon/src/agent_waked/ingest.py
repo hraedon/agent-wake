@@ -9,7 +9,10 @@ gate + dedupe the handler calls ``Router.deliver(event)``.
 import asyncio
 import json
 import logging
+import math
+import time
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -204,6 +207,59 @@ def _json_response(status: int, payload: dict[str, Any]) -> web.Response:
     )
 
 
+def _rate_limited(retry_after: float) -> web.Response:
+    response = _json_response(429, {"error": "rate limit exceeded"})
+    response.headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
+    return response
+
+
+def _client_address(request: web.Request) -> str:
+    """Remote peer used to key the pre-signature rate bucket.
+
+    The transport peer, not an ``X-Forwarded-For`` value: that header is
+    client-supplied and only trustworthy behind a reverse proxy this daemon
+    controls. Default ingest binds loopback, so this is the direct caller; a
+    deployment that terminates TLS/proxy in front must keep the peer it sees
+    distinct per origin for the per-peer bound to mean what it says.
+    """
+    return request.remote or "unknown"
+
+
+class SourceRateLimiter:
+    """In-process token buckets keyed by remote address, then by source.
+
+    A request is charged twice against the same bucket set: once by client
+    address before the HMAC verifies (so an unsigned flood cannot exhaust a
+    bucket keyed on the spoofable source header and starve the signed sender,
+    WI-008), and once by source after verification (the per-source cap on
+    authenticated traffic). Anonymous floods stay in their own per-peer
+    buckets and never touch a source bucket, which is what keeps the estate's
+    own signed sender from being 429'd by traffic it did not send.
+    """
+
+    def __init__(
+        self,
+        rate: float,
+        burst: int,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._rate = rate
+        self._burst = float(burst)
+        self._clock = clock
+        self._buckets: dict[str, tuple[float, float]] = {}
+
+    def allow(self, identifier: str) -> tuple[bool, float]:
+        now = self._clock()
+        tokens, updated_at = self._buckets.get(identifier, (self._burst, now))
+        tokens = min(self._burst, tokens + max(0.0, now - updated_at) * self._rate)
+        if tokens >= 1.0:
+            self._buckets[identifier] = (tokens - 1.0, now)
+            return True, 0.0
+        self._buckets[identifier] = (tokens, now)
+        return False, (1.0 - tokens) / self._rate
+
+
 def create_ingest_app(
     config: dict[str, Any],
     router: "Router",
@@ -214,6 +270,11 @@ def create_ingest_app(
     store: "WakeStore | None" = None,
 ) -> web.Application:
     dedupe = Dedupe(store=store)
+    wake_cfg = config.get("wake") or {}
+    rate_limiter = SourceRateLimiter(
+        rate=float(wake_cfg.get("ingest_rate_limit", 10.0)),
+        burst=int(wake_cfg.get("ingest_rate_burst", 20)),
+    )
     # RUF006: an ``ensure_future`` task nobody holds a reference to can be
     # garbage-collected mid-flight, silently dropping the delivery. Same
     # treatment as ``Router._background_tasks``. The set is also what lets
@@ -289,6 +350,16 @@ def create_ingest_app(
         signature = request.headers.get("X-AgentWake-Signature", "")
         event_id_header = request.headers.get("X-AgentWake-Event-Id")
 
+        # Pre-signature rate limit, keyed by remote address. The source header
+        # is spoofable, so a flood of unsigned requests claiming a known source
+        # must not be allowed to exhaust that source's bucket and 429-starve
+        # the estate's own signed sender (WI-008). Per-peer bounding keeps each
+        # flooding origin in its own bucket; the trusted sender identity keys
+        # its own bucket only after the HMAC verifies below.
+        peer_allowed, peer_retry = rate_limiter.allow(_client_address(request))
+        if not peer_allowed:
+            return _rate_limited(peer_retry)
+
         source_cfg = config.get("sources", {}).get(source)
         if not source_cfg:
             return _json_response(
@@ -312,6 +383,15 @@ def create_ingest_app(
             return _json_response(
                 403, {"error": "unknown source or invalid signature"}
             )
+
+        # Post-signature rate limit, keyed by the now-authenticated sender. The
+        # HMAC has verified, so ``source`` is a trusted identity rather than a
+        # spoofable header and is the right key for the per-source bucket. An
+        # unsigned flood can only ever reach the peer bucket above, so this one
+        # stays clean for the real sender.
+        source_allowed, source_retry = rate_limiter.allow(source)
+        if not source_allowed:
+            return _rate_limited(source_retry)
 
         # Identity gating: check sender identity against source allowlist.
         sender_identity = request.headers.get("X-AgentWake-Identity")
@@ -482,6 +562,10 @@ def create_ingest_app(
         # Counts and source names only; see secrets.visibility.health_summary for
         # why this stays safe on an unauthenticated port.
         body["sources"] = secret_visibility.health_summary(config)
+        subscriber_health = router.subscriber_health()
+        body["subscribers"] = subscriber_health
+        if subscriber_health["live_only_without_subscribers"]:
+            body["status"] = "degraded"
         if socket_server is not None:
             body["adapters"] = len(socket_server.connections)
         if delivery is not None:
