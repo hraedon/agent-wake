@@ -34,9 +34,8 @@ import { runClient, defaultSocketPath, type WakeEvent } from "./client";
 import { deliverWake, type OpencodeClientLike } from "./wake";
 import { executeReply } from "./reply";
 import {
-  handleSessionIdle,
+  handleOpencodeEvent,
   invalidateAcceptedSources,
-  noteSessionActivity,
   setAcceptedSources,
   type IdleNotifyConfig,
 } from "./idle-notify";
@@ -167,19 +166,6 @@ const agentWakeStatus = tool({
   },
 });
 
-/** Session id carried by an event, across the shapes opencode versions use. */
-function extractSessionId(evt: any): string | null {
-  const props = evt?.properties ?? {};
-  return (
-    (typeof props?.sessionID === "string" && props.sessionID) ||
-    (typeof props?.info?.sessionID === "string" && props.info.sessionID) ||
-    (typeof props?.info?.id === "string" && evt.type?.startsWith("session.") && props.info.id) ||
-    (typeof props?.part?.sessionID === "string" && props.part.sessionID) ||
-    (typeof evt?.sessionID === "string" && evt.sessionID) ||
-    null
-  );
-}
-
 function extractDeletedSessionId(input: any): string | null {
   // opencode's event payload shape varies across versions. Be liberal:
   // accept event.properties.info.id, event.properties.sessionID, or
@@ -212,23 +198,12 @@ export default async function plugin(ctx: PluginContext): Promise<Hooks> {
         }
       }
       const evt = input?.event ?? input;
-      // Any non-idle event naming a session is evidence that session is doing
-      // work while we watch — the signal that separates a real completion
-      // from opencode's replay of historical idles at harness startup.
-      if (evt?.type && evt.type !== "session.idle") {
-        const activeId = extractSessionId(evt);
-        if (activeId) noteSessionActivity(activeId);
-      }
-      if (evt?.type === "session.idle" && typeof evt?.properties?.sessionID === "string") {
-        // Fire-and-forget: never let a notify failure break event handling.
-        void handleSessionIdle(
-          savedCtx?.client,
-          evt.properties.sessionID,
-          notifyOnIdleConfig
-        ).catch((e: any) =>
-          log.warn(`notify-on-idle: unhandled error: ${e?.message ?? e}`)
-        );
-      }
+      // Activity tracking + idle notification both live in idle-notify so the
+      // exact event sequence opencode emits can be tested end to end.
+      // Fire-and-forget: never let a notify failure break event handling.
+      void handleOpencodeEvent(savedCtx?.client, evt, notifyOnIdleConfig).catch(
+        (e: any) => log.warn(`notify-on-idle: unhandled error: ${e?.message ?? e}`)
+      );
     },
     tool: {
       agent_wake_reply: agentWakeReply,

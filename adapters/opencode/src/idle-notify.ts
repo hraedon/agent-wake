@@ -493,9 +493,53 @@ export function noteSessionActivity(sessionId: string): void {
   if (sessionId) activeSessions.add(sessionId);
 }
 
+/** Forget a session entirely (deletion) — it can never legitimately notify. */
+export function forgetSession(sessionId: string): void {
+  activeSessions.delete(sessionId);
+}
+
 /** Test-only. */
 export function _resetActivity(): void {
   activeSessions.clear();
+}
+
+/** Test-only. */
+export function _activeSessionCount(): number {
+  return activeSessions.size;
+}
+
+/**
+ * The session id an event proves is WORKING, or null.
+ *
+ * Deliberately an allowlist of positive-work signals rather than
+ * "anything that isn't session.idle". `SessionStatus` has an `idle`
+ * variant, and opencode emits `session.status {type:"idle"}` immediately
+ * before the `session.idle` event — so a negative filter would mark the
+ * session active microseconds before the idle it is meant to suppress,
+ * silently defeating the entire replay guard (caught in review). Session
+ * lifecycle events (created/updated/deleted) are metadata, not work, and
+ * are excluded for the same reason: a startup replay announces them.
+ */
+export function activitySessionId(evt: any): string | null {
+  const type = evt?.type;
+  const props = evt?.properties ?? {};
+  switch (type) {
+    case "session.status": {
+      const status = props?.status?.type;
+      if (status !== "busy" && status !== "retry") return null;
+      return typeof props.sessionID === "string" ? props.sessionID : null;
+    }
+    case "message.updated": {
+      const id = props?.info?.sessionID;
+      return typeof id === "string" ? id : null;
+    }
+    case "message.part.updated": {
+      const id = props?.part?.sessionID;
+      return typeof id === "string" ? id : null;
+    }
+    default:
+      return null;
+  }
 }
 
 export async function postIdleEvent(
@@ -570,6 +614,47 @@ export interface SessionGetClientLike {
   session: {
     get: (opts: { path: { id: string } }) => Promise<any>;
   };
+}
+
+/**
+ * Single entry point for the plugin's event hook: classify the event, track
+ * activity, and notify on a genuine idle.
+ *
+ * Lives here rather than in index.ts so tests can drive REAL opencode event
+ * objects through the same code the plugin runs — the review that caught the
+ * `session.status{idle}` hole noted that testing the pieces separately could
+ * never have caught it.
+ *
+ * Activity is tracked only while the feature is enabled: with `cfg` null
+ * nothing consumes the marks, so recording them would grow the set for the
+ * process lifetime with no consumer.
+ */
+export async function handleOpencodeEvent(
+  client: SessionGetClientLike | undefined,
+  evt: any,
+  cfg: IdleNotifyConfig | null,
+  fetchImpl?: FetchLike
+): Promise<void> {
+  if (!cfg) return;
+
+  const activeId = activitySessionId(evt);
+  if (activeId) {
+    noteSessionActivity(activeId);
+    return;
+  }
+
+  if (evt?.type === "session.deleted") {
+    const deleted =
+      (typeof evt?.properties?.info?.id === "string" && evt.properties.info.id) ||
+      (typeof evt?.properties?.sessionID === "string" && evt.properties.sessionID) ||
+      null;
+    if (deleted) forgetSession(deleted);
+    return;
+  }
+
+  if (evt?.type === "session.idle" && typeof evt?.properties?.sessionID === "string") {
+    await handleSessionIdle(client, evt.properties.sessionID, cfg, fetchImpl);
+  }
 }
 
 export async function handleSessionIdle(
