@@ -319,6 +319,9 @@ class SocketServer:
         )
 
         accepted = self._router.accepted_sources_for(adapter, sources)
+        # A subscriber now serves these destinations — clears the
+        # silent-accumulation warning state for them (WI-011).
+        self._router.note_subscribed(destinations or accepted)
 
         ack = {
             "type": "hello_ack",

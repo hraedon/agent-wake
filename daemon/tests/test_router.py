@@ -366,3 +366,73 @@ class TestDeliver:
         # A non-connection failure must NOT evict the subscriber (it's a
         # code bug, not a dead socket).
         assert "s1" in r._subscribers
+
+
+# ── silent-accumulation warning (WI-011) ─────────────────────────────
+
+class TestQueueWithoutSubscriberWarning:
+    """Durable queueing must not look healthy when the leg is broken.
+
+    Nine wakes accumulated for six days on mvmcc03 while every log line said
+    ``queued for next session`` — the Claude adapter's channel was silently
+    skipped by org policy and nothing surfaced it.
+    """
+
+    def _router(self):
+        return Router(_config_with_routing())
+
+    def test_warns_every_third_queued_event_and_flags_never_subscribed(self, caplog):
+        r = self._router()
+        caplog.set_level("WARNING")
+        for _ in range(3):
+            r._note_queued_without_delivery("github-actions")
+        assert "NO subscriber has served it" in caplog.text
+        assert "github-actions" in caplog.text
+
+    def test_quiet_below_threshold(self, caplog):
+        r = self._router()
+        caplog.set_level("WARNING")
+        for _ in range(2):
+            r._note_queued_without_delivery("github-actions")
+        assert caplog.text == ""
+
+    def test_subscribed_destination_gets_the_softer_message(self, caplog):
+        r = self._router()
+        r.note_subscribed(["github-actions"])
+        caplog.set_level("WARNING")
+        for _ in range(3):
+            r._note_queued_without_delivery("github-actions")
+        assert "has not returned" in caplog.text
+        assert "NO subscriber has served it" not in caplog.text
+
+    def test_delivery_resets_the_counter(self, caplog):
+        r = self._router()
+        for _ in range(2):
+            r._note_queued_without_delivery("github-actions")
+        r.note_delivered("github-actions")
+        caplog.set_level("WARNING")
+        for _ in range(2):
+            r._note_queued_without_delivery("github-actions")
+        assert caplog.text == ""
+
+    def test_subscribe_resets_the_counter(self, caplog):
+        r = self._router()
+        for _ in range(2):
+            r._note_queued_without_delivery("github-actions")
+        r.note_subscribed(["github-actions"])
+        caplog.set_level("WARNING")
+        for _ in range(2):
+            r._note_queued_without_delivery("github-actions")
+        assert caplog.text == ""
+
+    def test_counters_are_per_destination(self, caplog):
+        r = self._router()
+        caplog.set_level("WARNING")
+        for _ in range(2):
+            r._note_queued_without_delivery("github-actions")
+        r._note_queued_without_delivery("telegram-bot")
+        assert caplog.text == ""
+
+    def test_note_subscribed_tolerates_none(self):
+        r = self._router()
+        r.note_subscribed(None)  # must not raise

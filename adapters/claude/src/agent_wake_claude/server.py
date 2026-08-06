@@ -63,8 +63,16 @@ def handle(msg: dict[str, Any]) -> None:
     params = msg.get("params") or {}
 
     if method == "initialize":
+        # Pin the protocol revision the channels research preview was built
+        # against — do NOT echo the client's offer. Claude Code >=2.1.x
+        # offers a modern MCP revision, and its channel registration skips
+        # any connection that "negotiated a modern protocol revision with no
+        # unsolicited notification path" (skip kind: era). Echoing the offer
+        # therefore silently disabled every wake delivery (WI-011). MCP
+        # version negotiation allows the server to answer with the revision
+        # it supports; the client continues on the legacy path.
         _reply(req_id, {
-            "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+            "protocolVersion": "2025-03-26",
             "capabilities": {
                 "experimental": {
                     "claude/channel": {},
