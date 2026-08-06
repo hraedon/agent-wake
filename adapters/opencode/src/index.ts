@@ -33,6 +33,7 @@ import { loadConfig, type Config } from "./config";
 import { runClient, defaultSocketPath, type WakeEvent } from "./client";
 import { deliverWake, type OpencodeClientLike } from "./wake";
 import { executeReply } from "./reply";
+import { handleSessionIdle, type IdleNotifyConfig } from "./idle-notify";
 import {
   subscribe as labelSubscribe,
   unsubscribe as labelUnsubscribe,
@@ -50,6 +51,7 @@ let started = false;
 let stopClient: (() => Promise<void>) | null = null;
 let savedCtx: PluginContext | null = null;
 let lastAttemptAt: number = 0;
+let notifyOnIdleConfig: IdleNotifyConfig | null = null;
 const MIN_RETRY_INTERVAL_MS = 5_000;
 
 function ensureClientStarted(): void {
@@ -61,6 +63,7 @@ function ensureClientStarted(): void {
   started = true;
   try {
     const config: Config = loadConfig();
+    notifyOnIdleConfig = config.notifyOnIdle;
     const socketPath = config.socketPath ?? defaultSocketPath();
     const sdkClient = savedCtx?.client as OpencodeClientLike | undefined;
     if (!sdkClient?.session) {
@@ -186,6 +189,17 @@ export default async function plugin(ctx: PluginContext): Promise<Hooks> {
             `gc: dropped labels ${JSON.stringify(dropped)} for deleted session ${deletedId}`
           );
         }
+      }
+      const evt = input?.event ?? input;
+      if (evt?.type === "session.idle" && typeof evt?.properties?.sessionID === "string") {
+        // Fire-and-forget: never let a notify failure break event handling.
+        void handleSessionIdle(
+          savedCtx?.client,
+          evt.properties.sessionID,
+          notifyOnIdleConfig
+        ).catch((e: any) =>
+          log.warn(`notify-on-idle: unhandled error: ${e?.message ?? e}`)
+        );
       }
     },
     tool: {

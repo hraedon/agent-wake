@@ -10,11 +10,14 @@
  */
 import { readFileSync } from "fs";
 import { log } from "./log";
+import { parseIdleNotifyConfig, type IdleNotifyConfig } from "./idle-notify";
 
 export interface Config {
   version: number;
   socketPath: string | null;
   sources: string[];
+  /** Optional notify-on-idle block; null when absent or disabled. */
+  notifyOnIdle: IdleNotifyConfig | null;
 }
 
 export class ConfigError extends Error {}
@@ -62,5 +65,6 @@ export function loadConfig(path?: string): Config {
     version,
     socketPath: raw.socket_path ?? null,
     sources,
+    notifyOnIdle: parseIdleNotifyConfig(raw),
   };
 }
