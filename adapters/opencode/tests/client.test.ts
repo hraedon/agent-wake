@@ -310,6 +310,71 @@ describe("oneSession", () => {
   });
 });
 
+describe("oneSession accepted-sources wiring", () => {
+  test("onAcceptedSources fires on hello_ack and onDisconnect fires on close, in order", async () => {
+    const { path: sockPath } = tmpSocketPath();
+    const events: string[] = [];
+    const daemon = startMockDaemon(sockPath, (socket, received) => {
+      const check = setInterval(() => {
+        if (received.length > 0) {
+          clearInterval(check);
+          writeFrame(socket, {
+            type: "hello_ack",
+            session_id: "sess-1",
+            accepted_sources: ["demo-opencode"],
+          });
+          // Give the client a beat to process the ack, then drop the
+          // connection — the disconnect callback must follow the ack.
+          setTimeout(() => socket.end(), 30);
+        }
+      }, 10);
+    });
+
+    await oneSession({
+      socketPath: sockPath,
+      sources: ["demo-opencode"],
+      onWake: async () => {},
+      onAcceptedSources: (sources) => {
+        events.push(`ack:${sources.join(",")}`);
+      },
+      onDisconnect: () => {
+        events.push("disconnect");
+      },
+    });
+
+    expect(events).toEqual(["ack:demo-opencode", "disconnect"]);
+    await daemon.close();
+  });
+
+  test("onDisconnect fires even when the daemon never acks", async () => {
+    const { path: sockPath } = tmpSocketPath();
+    const events: string[] = [];
+    const daemon = startMockDaemon(sockPath, (socket, received) => {
+      const check = setInterval(() => {
+        if (received.length > 0) {
+          clearInterval(check);
+          socket.end(); // close without hello_ack
+        }
+      }, 10);
+    });
+
+    await oneSession({
+      socketPath: sockPath,
+      sources: ["demo-opencode"],
+      onWake: async () => {},
+      onAcceptedSources: (sources) => {
+        events.push(`ack:${sources.join(",")}`);
+      },
+      onDisconnect: () => {
+        events.push("disconnect");
+      },
+    });
+
+    expect(events).toEqual(["disconnect"]);
+    await daemon.close();
+  });
+});
+
 describe("runClient", () => {
   test("reconnects after the daemon drops the connection", async () => {
     const { dir, path: sockPath } = tmpSocketPath();

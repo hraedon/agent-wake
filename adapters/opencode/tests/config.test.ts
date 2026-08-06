@@ -59,4 +59,34 @@ describe("loadConfig", () => {
     const cfg = loadConfig(p);
     expect(cfg.sources).toEqual(["demo"]);
   });
+
+  test("notifyOnIdle is null when the block is absent", () => {
+    const p = writeTmpConfig({ version: 1, sources: { demo: {} } });
+    expect(loadConfig(p).notifyOnIdle).toBeNull();
+  });
+
+  test("notifyOnIdle parses through the public loader with configPath and source-derived URIs", () => {
+    const p = writeTmpConfig({
+      version: 1,
+      sources: {
+        demo: { secret_env: "X" },
+        "demo-claude": { secrets: ["env://ROT_NEW", "env://ROT_OLD"] },
+      },
+      opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+    });
+    const cfg = loadConfig(p);
+    expect(cfg.notifyOnIdle).not.toBeNull();
+    expect(cfg.notifyOnIdle!.source).toBe("demo-claude");
+    expect(cfg.notifyOnIdle!.configPath).toBe(p);
+    expect(cfg.notifyOnIdle!.secretUris).toEqual(["env://ROT_NEW", "env://ROT_OLD"]);
+  });
+
+  test("v2 documents are rejected by the loader — notify-on-idle cannot run against v2", () => {
+    const p = writeTmpConfig({
+      version: 2,
+      senders: { demo: { secret_env: "X" } },
+      opencode_notify_on_idle: { source: "demo", identity: "i" },
+    });
+    expect(() => loadConfig(p)).toThrow(ConfigError);
+  });
 });
