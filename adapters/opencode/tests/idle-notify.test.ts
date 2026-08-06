@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
@@ -26,10 +26,23 @@ function cfgWith(overrides: Partial<IdleNotifyConfig> = {}): IdleNotifyConfig {
     identity: "human:demo",
     ingestUrl: "http://127.0.0.1:8788/",
     secretUris: ["env://AGENT_WAKE_DEMO_CLAUDE_SECRET"],
+    configPath: null,
+    secretEnvOverride: null,
     secretsFile: null,
     delivery: "next_session",
     ...overrides,
   };
+}
+
+function tmpConfigFile(data: Record<string, any>): string {
+  const dir = mkdtempSync(join(tmpdir(), "aw-oc-cfg-"));
+  const file = join(dir, "config.json");
+  writeFileSync(file, JSON.stringify(data));
+  return file;
+}
+
+function readFileSyncStr(path: string): string {
+  return readFileSync(path, "utf-8");
 }
 
 function tmpSecretsFile(content: string): string {
@@ -114,12 +127,14 @@ describe("parseIdleNotifyConfig", () => {
       expect(cfg.secretUris).toEqual(["env://SOME_NAME"]);
     });
 
-    test("v2 'senders' vocabulary is honored", () => {
+    test("v2 'senders' vocabulary is NOT consulted (adapter is v0/v1 only)", () => {
       const cfg = parseIdleNotifyConfig({
         senders: { "demo-claude": { secret_env: "FROM_SENDERS" } },
         opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
       })!;
-      expect(cfg.secretUris).toEqual(["env://FROM_SENDERS"]);
+      // Falls back to the derived name — the loader rejects v2 documents,
+      // so senders entries must never silently feed secret resolution.
+      expect(cfg.secretUris).toEqual(["env://AGENT_WAKE_DEMO_CLAUDE_SECRET"]);
     });
 
     test("explicit block-level secret_env overrides the source entry", () => {
@@ -234,6 +249,93 @@ describe("resolveSecret", () => {
   test("returns null when nothing resolvable", () => {
     const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_MISSING"], secretsFile: null });
     expect(resolveSecret(cfg)).toBeNull();
+  });
+
+  test("survives TWO rotations without restart: URI list re-derived from config at publish time", () => {
+    // Startup: source has the original single secret_env.
+    const configPath = tmpConfigFile({
+      version: 1,
+      sources: { "demo-claude": { secret_env: "AW_ROTLIVE_ORIG" } },
+      opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+    });
+    const secretsFile = tmpSecretsFile("AW_ROTLIVE_ORIG=v0\n");
+    const cfg = {
+      ...parseIdleNotifyConfig(JSON.parse(readFileSyncStr(configPath)), configPath)!,
+      secretsFile,
+    };
+    expect(resolveSecret(cfg)).toBe("v0");
+
+    // Rotation 1: rotate prepends NEW, keeps ORIG (window of 2), appends to secrets.env.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        sources: {
+          "demo-claude": { secrets: ["env://AW_ROTLIVE_NEW", "env://AW_ROTLIVE_ORIG"] },
+        },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })
+    );
+    writeFileSync(secretsFile, "AW_ROTLIVE_ORIG=v0\nAW_ROTLIVE_NEW=v1\n");
+    expect(resolveSecret(cfg)).toBe("v1");
+
+    // Rotation 2: window is now [NEW_1, NEW] — ORIG is out. A startup
+    // snapshot would still sign with v0 and be rejected; live re-read
+    // must pick v2.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        sources: {
+          "demo-claude": { secrets: ["env://AW_ROTLIVE_NEW_1", "env://AW_ROTLIVE_NEW"] },
+        },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })
+    );
+    writeFileSync(
+      secretsFile,
+      "AW_ROTLIVE_ORIG=v0\nAW_ROTLIVE_NEW=v1\nAW_ROTLIVE_NEW_1=v2\n"
+    );
+    expect(resolveSecret(cfg)).toBe("v2");
+  });
+
+  test("explicit secret_env override pins the name across config rewrites", () => {
+    const configPath = tmpConfigFile({
+      version: 1,
+      sources: { "demo-claude": { secrets: ["env://AW_PIN_ROTATED"] } },
+      opencode_notify_on_idle: { source: "demo-claude", identity: "i", secret_env: "AW_PIN_FIXED" },
+    });
+    const secretsFile = tmpSecretsFile("AW_PIN_FIXED=pinned\nAW_PIN_ROTATED=rotated\n");
+    const cfg = {
+      ...parseIdleNotifyConfig(JSON.parse(readFileSyncStr(configPath)), configPath)!,
+      secretsFile,
+    };
+    expect(resolveSecret(cfg)).toBe("pinned");
+  });
+
+  test("unreadable config at publish time falls back to the startup snapshot", () => {
+    const secretsFile = tmpSecretsFile("AW_SNAP_ORIG=snapshot-value\n");
+    const cfg = cfgWith({
+      secretUris: ["env://AW_SNAP_ORIG"],
+      configPath: "/nonexistent/config.json",
+      secretsFile,
+    });
+    expect(resolveSecret(cfg)).toBe("snapshot-value");
+  });
+
+  test("AGENT_WAKE_SECRETS_ENV sets the default secrets file (CLI parity)", () => {
+    const file = tmpSecretsFile("AW_CLIPARITY=via-override\n");
+    process.env.AGENT_WAKE_SECRETS_ENV = file;
+    try {
+      const cfg = parseIdleNotifyConfig({
+        sources: { "demo-claude": { secret_env: "AW_CLIPARITY" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })!;
+      expect(cfg.secretsFile).toBe(file);
+      expect(resolveSecret(cfg)).toBe("via-override");
+    } finally {
+      delete process.env.AGENT_WAKE_SECRETS_ENV;
+    }
   });
 });
 

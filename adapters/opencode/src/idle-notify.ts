@@ -51,15 +51,24 @@ export interface IdleNotifyConfig {
   identity: string;
   ingestUrl: string;
   /**
-   * Ordered secret URIs to try when signing (first resolvable wins).
+   * STARTUP SNAPSHOT of the ordered secret URIs (first resolvable wins).
    * Mirrors the daemon's source vocabulary: after `agent-wake secrets
    * rotate` a source holds `secrets: ["env://..._SECRET_NEW", "env://..."]`
    * — newest first. The daemon verifies against ANY entry in the window,
    * so signing with the first resolvable one is always accepted.
-   * Only env:// URIs are resolvable by this adapter today; other
-   * backends (vault://, file://) are skipped with a warning.
+   *
+   * Rotation happens while opencode keeps running, so the LIVE list is
+   * re-derived from `configPath` on every publish (see
+   * `currentSecretUris`); this snapshot is only the fallback when the
+   * config file has become unreadable at publish time. Only env:// URIs
+   * are resolvable by this adapter today; other backends (vault://,
+   * file://) are skipped with a warning.
    */
   secretUris: string[];
+  /** Path of the config document secretUris came from; null in tests. */
+  configPath: string | null;
+  /** Explicit block-level secret_env override — disables live re-derivation. */
+  secretEnvOverride: string | null;
   secretsFile: string | null;
   delivery: "live_only" | "next_session" | "managed_session";
 }
@@ -71,18 +80,31 @@ function defaultSecretEnv(source: string): string {
 }
 
 function defaultSecretsFile(): string | null {
+  // AGENT_WAKE_SECRETS_ENV is the same override the operator CLI honors
+  // (daemon cli/secrets.py _env_file_path) — a custom secrets file set
+  // there must not require redundant adapter configuration.
+  const override = process.env.AGENT_WAKE_SECRETS_ENV;
+  if (override) return override;
   return process.env.HOME ? `${process.env.HOME}/.config/agent-wake/secrets.env` : null;
 }
 
 /**
  * Derive the ordered secret-URI list for a source from the same config
- * document the daemon reads, honoring all three source-vocabulary
+ * document the daemon reads, honoring the v0/v1 source-vocabulary
  * spellings (`secrets` list > `secret` uri > `secret_env` name). This is
  * what keeps the adapter working across `agent-wake secrets rotate`,
  * which renames the env var and rewrites the source to list form.
+ *
+ * v0/v1 ONLY — deliberately. This whole adapter's loader (config.ts)
+ * rejects version-2 documents, so notify-on-idle inherits that boundary:
+ * the v2 `senders` vocabulary is NOT consulted here, and the loop guard
+ * below relies on v1 semantics (routing maps a source name to exactly
+ * one adapter, so source-name equality against accepted_sources is the
+ * correct loop test). When the adapter grows v2 support, this function
+ * and the loop guard must be revisited together.
  */
 function secretUrisForSource(raw: any, source: string): string[] {
-  const entry = raw?.sources?.[source] ?? raw?.senders?.[source];
+  const entry = raw?.sources?.[source];
   if (entry && typeof entry === "object") {
     if (Array.isArray(entry.secrets) && entry.secrets.length > 0) {
       return entry.secrets.filter((u: unknown) => typeof u === "string");
@@ -100,11 +122,36 @@ function secretUrisForSource(raw: any, source: string): string[] {
 }
 
 /**
+ * The LIVE secret-URI list for this publish. `agent-wake secrets rotate`
+ * rewrites the config while opencode keeps running; a startup snapshot
+ * survives one rotation (the old key stays in the 2-entry window) but
+ * strands the adapter on the second (review cycle 2, blocking). An
+ * explicit operator override pins the list and skips re-derivation.
+ * Unreadable/unparsable config at publish time falls back to the
+ * startup snapshot with a warning — better a possibly-stale window
+ * entry than dropping the wake outright.
+ */
+function currentSecretUris(cfg: IdleNotifyConfig): string[] {
+  if (cfg.secretEnvOverride) return [`env://${cfg.secretEnvOverride}`];
+  if (!cfg.configPath) return cfg.secretUris;
+  try {
+    const raw = JSON.parse(readFileSync(cfg.configPath, "utf-8"));
+    return secretUrisForSource(raw, cfg.source);
+  } catch (e: any) {
+    log.warn(
+      `notify-on-idle: could not re-read ${cfg.configPath} for current secret URIs ` +
+        `(${e?.message ?? e}); using startup snapshot`
+    );
+    return cfg.secretUris;
+  }
+}
+
+/**
  * Parse the optional `opencode_notify_on_idle` block out of the (already
  * JSON-parsed) agent-wake config document. Returns null when the block is
  * absent or disabled — callers treat null as "feature off".
  */
-export function parseIdleNotifyConfig(raw: any): IdleNotifyConfig | null {
+export function parseIdleNotifyConfig(raw: any, configPath: string | null = null): IdleNotifyConfig | null {
   const block = raw?.opencode_notify_on_idle;
   if (!block) return null;
   if (typeof block !== "object" || Array.isArray(block)) {
@@ -134,10 +181,11 @@ export function parseIdleNotifyConfig(raw: any): IdleNotifyConfig | null {
 
   // Explicit block-level secret_env is an operator override; otherwise
   // resolve from the source's own entry so rotation Just Works.
-  const secretUris =
-    typeof block.secret_env === "string" && block.secret_env
-      ? [`env://${block.secret_env}`]
-      : secretUrisForSource(raw, source);
+  const secretEnvOverride =
+    typeof block.secret_env === "string" && block.secret_env ? block.secret_env : null;
+  const secretUris = secretEnvOverride
+    ? [`env://${secretEnvOverride}`]
+    : secretUrisForSource(raw, source);
 
   return {
     enabled: true,
@@ -146,6 +194,8 @@ export function parseIdleNotifyConfig(raw: any): IdleNotifyConfig | null {
     identity,
     ingestUrl: typeof block.ingest_url === "string" ? block.ingest_url : "http://127.0.0.1:8788/",
     secretUris,
+    configPath,
+    secretEnvOverride,
     secretsFile:
       block.secrets_file === null
         ? null
@@ -209,7 +259,7 @@ function lookupSecretInFile(secretsFile: string | null, name: string): FileLooku
  * without a server restart.
  */
 export function resolveSecret(cfg: IdleNotifyConfig): string | null {
-  for (const uri of cfg.secretUris) {
+  for (const uri of currentSecretUris(cfg)) {
     if (!uri.startsWith("env://")) {
       log.warn(`notify-on-idle: unsupported secret backend ${JSON.stringify(uri)}; skipping`);
       continue;
@@ -299,6 +349,12 @@ const POST_TIMEOUT_MS = 10_000;
  * hello_ack. Publishing as one of these would deliver the wake straight
  * back into opencode — see the loop-prevention note in the module
  * docstring. index.ts updates this on every (re)subscribe.
+ *
+ * v1 semantics only: under v0/v1, routing maps a source name to exactly
+ * one adapter, so name equality is the correct loop test. Under the v2
+ * sender/destination split the comparison would be between different
+ * namespaces — but this adapter's loader rejects v2 configs outright,
+ * so that combination cannot arise (see secretUrisForSource docstring).
  */
 let acceptedSources: ReadonlySet<string> = new Set();
 let loopWarned = false;

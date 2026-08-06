@@ -65,6 +65,9 @@ export function loadConfig(path?: string): Config {
     version,
     socketPath: raw.socket_path ?? null,
     sources,
-    notifyOnIdle: parseIdleNotifyConfig(raw),
+    // Pass the resolved path so notify-on-idle can re-derive the secret
+    // URI list at publish time — rotation rewrites this document while
+    // opencode keeps running.
+    notifyOnIdle: parseIdleNotifyConfig(raw, configPath),
   };
 }
