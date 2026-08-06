@@ -393,8 +393,34 @@ class Router:
             )
 
     def note_delivered(self, destination: str | None) -> None:
-        """Reset the silent-accumulation counter after a live delivery."""
+        """Reset the silent-accumulation counter after a live delivery.
+
+        Deliberately keyed on the successful socket write, not the
+        application-level ack: this detector answers "is anything on the other
+        end of this leg", and a subscriber that accepts frames and NACKs them
+        is present. Delivery-quality problems (persistent NACKs) are a
+        different failure with its own logging in ``_wait_for_ack``; folding
+        them in here would make the outage signal noisier without making it
+        more accurate.
+        """
         self._consecutive_queued.pop(destination or "", None)
+
+    def prune_warning_state(self) -> None:
+        """Drop warning state for destinations the live config no longer has.
+
+        Called after a config reload. Without this, both collections grow for
+        the daemon's lifetime across reloads, and a destination name that is
+        removed and later re-added inherits a stale "has been subscribed"
+        marker — which would downgrade the loud never-subscribed warning to
+        the soft one for a leg that has, in its new incarnation, never worked.
+        """
+        current = set(addressing.destination_table(self._config))
+        for name in list(self._ever_subscribed):
+            if name not in current:
+                self._ever_subscribed.discard(name)
+        for name in list(self._consecutive_queued):
+            if name and name not in current:
+                self._consecutive_queued.pop(name, None)
 
     def note_subscribed(self, destinations: Any) -> None:
         """Record that a subscriber now serves these destinations.

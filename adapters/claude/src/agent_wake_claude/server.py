@@ -68,9 +68,16 @@ def handle(msg: dict[str, Any]) -> None:
         # offers a modern MCP revision, and its channel registration skips
         # any connection that "negotiated a modern protocol revision with no
         # unsolicited notification path" (skip kind: era). Echoing the offer
-        # therefore silently disabled every wake delivery (WI-011). MCP
-        # version negotiation allows the server to answer with the revision
-        # it supports; the client continues on the legacy path.
+        # therefore silently disabled every wake delivery (WI-011).
+        #
+        # Compatibility boundary: MCP negotiation permits a server to answer
+        # with a revision it supports when the offer is unsupported, and the
+        # client then either proceeds on that revision or disconnects. This
+        # adapter is therefore only usable with clients that still speak
+        # 2025-03-26 — which is exactly the set that supports channels at
+        # all. It is a deliberate narrowing, not universal fallback: when
+        # the channel protocol gains an unsolicited-notification path on a
+        # newer revision, this pin should move with it.
         _reply(req_id, {
             "protocolVersion": "2025-03-26",
             "capabilities": {

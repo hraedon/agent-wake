@@ -321,7 +321,14 @@ class SocketServer:
         accepted = self._router.accepted_sources_for(adapter, sources)
         # A subscriber now serves these destinations — clears the
         # silent-accumulation warning state for them (WI-011).
-        self._router.note_subscribed(destinations or accepted)
+        #
+        # DESTINATIONS ONLY, never `destinations or accepted`: the two are
+        # different namespaces, and destinations_for_hello() already folds a
+        # legacy source-only hello into destination names. The fallback would
+        # only ever fire when explicit destination claims were all REJECTED,
+        # and would then record a same-named legacy source as served — a false
+        # subscription that silences the very warning this exists to raise.
+        self._router.note_subscribed(destinations)
 
         ack = {
             "type": "hello_ack",

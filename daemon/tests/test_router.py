@@ -436,3 +436,52 @@ class TestQueueWithoutSubscriberWarning:
     def test_note_subscribed_tolerates_none(self):
         r = self._router()
         r.note_subscribed(None)  # must not raise
+
+    def test_rejected_destination_claims_do_not_record_a_subscription(self):
+        """A hello whose explicit destination claims are all rejected must not
+        mark a same-named legacy source as served.
+
+        destinations_for_hello() returns [] when every claim is filtered out
+        (unknown destination, or one configured for a different adapter). The
+        socket server must pass exactly that, not fall back to
+        accepted_sources_for() — the namespaces differ, and a false
+        subscription silences the accumulation warning (sol review, WI-011).
+        """
+        r = self._router()
+        # 'telegram-bot' is configured for the opencode adapter, so a claude
+        # adapter claiming it gets nothing back.
+        destinations = r.destinations_for_hello("claude", [], ["telegram-bot"])
+        assert destinations == []
+        accepted = r.accepted_sources_for("claude", ["github-actions"])
+        assert accepted  # the legacy namespace WOULD have offered a name
+
+        r.note_subscribed(destinations)
+        assert "telegram-bot" not in r._ever_subscribed
+        assert not r._ever_subscribed
+
+    def test_legacy_source_only_hello_still_records_its_destination(self):
+        """The legacy path must keep working: a sources-only hello resolves to
+        destination names, which are what gets recorded."""
+        r = self._router()
+        destinations = r.destinations_for_hello("claude", ["github-actions"], None)
+        assert destinations == ["github-actions"]
+        r.note_subscribed(destinations)
+        assert "github-actions" in r._ever_subscribed
+
+    def test_prune_drops_state_for_removed_destinations(self):
+        r = self._router()
+        r.note_subscribed(["github-actions", "telegram-bot"])
+        r._note_queued_without_delivery("telegram-bot")
+        # Config reload removes telegram-bot entirely.
+        del r._config["sources"]["telegram-bot"]
+        del r._config["routing"]["telegram-bot"]
+        r.prune_warning_state()
+        assert "telegram-bot" not in r._ever_subscribed
+        assert "telegram-bot" not in r._consecutive_queued
+        assert "github-actions" in r._ever_subscribed
+
+    def test_prune_keeps_state_for_surviving_destinations(self):
+        r = self._router()
+        r._note_queued_without_delivery("github-actions")
+        r.prune_warning_state()
+        assert r._consecutive_queued.get("github-actions") == 1
