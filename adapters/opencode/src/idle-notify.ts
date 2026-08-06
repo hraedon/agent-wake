@@ -470,6 +470,34 @@ export function _resetLoopGuard(): void {
 /** Sessions with a POST already in flight — suppress concurrent duplicates. */
 const inFlight = new Set<string>();
 
+/**
+ * Sessions this plugin instance has watched do actual work.
+ *
+ * opencode replays `session.idle` for PRE-EXISTING sessions when a harness
+ * starts: launching the TUI on this host fired idle for all nine historical
+ * `[wake]`-titled sessions at once, and notify-on-idle dutifully re-published
+ * a wake for every one — a stale-notification storm on every restart, for
+ * work that finished hours earlier.
+ *
+ * "Was this session active while we were watching?" is the precise
+ * distinction, and it is cheap: every non-idle event carrying a session id
+ * marks that session live, and only a marked session may notify on idle.
+ * A replayed idle for a session that has done nothing this lifetime is
+ * silently ignored. The mark is consumed on notify, so one completed turn
+ * yields exactly one wake.
+ */
+const activeSessions = new Set<string>();
+
+/** Record that a session did something observable in this plugin lifetime. */
+export function noteSessionActivity(sessionId: string): void {
+  if (sessionId) activeSessions.add(sessionId);
+}
+
+/** Test-only. */
+export function _resetActivity(): void {
+  activeSessions.clear();
+}
+
 export async function postIdleEvent(
   info: IdleSessionInfo,
   cfg: IdleNotifyConfig,
@@ -551,6 +579,15 @@ export async function handleSessionIdle(
   fetchImpl?: FetchLike
 ): Promise<void> {
   if (!cfg) return;
+  // Startup replay guard: an idle for a session we never watched work is
+  // history being re-announced, not a completion. Consume the mark so one
+  // turn produces exactly one wake.
+  if (!activeSessions.delete(sessionID)) {
+    log.info(
+      `notify-on-idle: ignoring idle for session ${sessionID} — no activity observed this plugin lifetime (startup replay)`
+    );
+    return;
+  }
   if (!client?.session?.get) {
     log.warn("notify-on-idle: opencode client unavailable; cannot inspect idle session");
     return;

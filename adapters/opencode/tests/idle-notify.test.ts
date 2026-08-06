@@ -14,6 +14,8 @@ import {
   handleSessionIdle,
   setAcceptedSources,
   invalidateAcceptedSources,
+  noteSessionActivity,
+  _resetActivity,
   _resetLoopGuard,
   IdleNotifyConfigError,
   type IdleNotifyConfig,
@@ -55,6 +57,7 @@ function tmpSecretsFile(content: string): string {
 
 afterEach(() => {
   _resetLoopGuard();
+  _resetActivity();
 });
 
 describe("parseIdleNotifyConfig", () => {
@@ -746,6 +749,7 @@ describe("handleSessionIdle", () => {
           get: async () => sdkEnvelope({ id: "ses_z", title: "[wake] review", directory: "/r" }),
         },
       };
+      noteSessionActivity("ses_z");
       await handleSessionIdle(client, "ses_z", cfg, fetchImpl);
       expect(posted).toBe(true);
     } finally {
@@ -779,6 +783,7 @@ describe("handleSessionIdle", () => {
       const client = {
         session: { get: async () => sdkEnvelope({ id: "s", title: "plain title" }) },
       };
+      noteSessionActivity("s");
       await handleSessionIdle(client, "s", cfg, fetchImpl);
       expect(posted).toBe(false);
     } finally {
@@ -800,10 +805,98 @@ describe("handleSessionIdle", () => {
           get: async () => ({ data: undefined, error: { message: "not found" }, response: { status: 404 } }),
         },
       };
+      noteSessionActivity("gone");
       await handleSessionIdle(client, "gone", cfg, fetchImpl);
       expect(posted).toBe(false);
     } finally {
       delete process.env.AW_TEST_SECRET_G;
+    }
+  });
+});
+
+describe("startup replay guard", () => {
+  const sdkEnvelope = (data: any) => ({ data, error: undefined, response: { status: 200 } });
+
+  test("idle for a session never observed active is ignored (no session.get, no post)", async () => {
+    process.env.AW_TEST_SECRET_R = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_R"] });
+      let fetched = false;
+      let posted = false;
+      const client = {
+        session: {
+          get: async () => {
+            fetched = true;
+            return sdkEnvelope({ id: "ses_old", title: "[wake] yesterday's review" });
+          },
+        },
+      };
+      const fetchImpl = async () => {
+        posted = true;
+        return { status: 202, text: async () => "" };
+      };
+      // No noteSessionActivity: this is opencode replaying a historical idle
+      // at harness startup, which re-published nine stale wakes in production.
+      await handleSessionIdle(client, "ses_old", cfg, fetchImpl);
+      expect(fetched).toBe(false);
+      expect(posted).toBe(false);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R;
+    }
+  });
+
+  test("a session observed active notifies exactly once per turn", async () => {
+    process.env.AW_TEST_SECRET_R2 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_R2"] });
+      let posts = 0;
+      const client = {
+        session: { get: async () => sdkEnvelope({ id: "ses_live", title: "[wake] now" }) },
+      };
+      const fetchImpl = async () => {
+        posts += 1;
+        return { status: 202, text: async () => "" };
+      };
+
+      noteSessionActivity("ses_live");
+      await handleSessionIdle(client, "ses_live", cfg, fetchImpl);
+      expect(posts).toBe(1);
+
+      // A duplicate idle with no new activity must not re-notify.
+      await handleSessionIdle(client, "ses_live", cfg, fetchImpl);
+      expect(posts).toBe(1);
+
+      // The next turn marks activity again and earns its own wake.
+      noteSessionActivity("ses_live");
+      await handleSessionIdle(client, "ses_live", cfg, fetchImpl);
+      expect(posts).toBe(2);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R2;
+    }
+  });
+
+  test("activity marks are per session", async () => {
+    process.env.AW_TEST_SECRET_R3 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_R3"] });
+      let posts = 0;
+      const client = {
+        session: { get: async () => sdkEnvelope({ id: "ses_a", title: "[wake] a" }) },
+      };
+      const fetchImpl = async () => {
+        posts += 1;
+        return { status: 202, text: async () => "" };
+      };
+      noteSessionActivity("ses_a");
+      await handleSessionIdle(client, "ses_b", cfg, fetchImpl);
+      expect(posts).toBe(0);
+      await handleSessionIdle(client, "ses_a", cfg, fetchImpl);
+      expect(posts).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R3;
     }
   });
 });
