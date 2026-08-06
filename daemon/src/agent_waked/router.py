@@ -49,6 +49,11 @@ _ACK_TIMEOUT = 30.0
 #     process). The daemon queues it exactly like next_session; the difference
 #     is which component drains it, so there is no second store.
 _DURABLE_MODES = frozenset({"next_session", "managed_session"})
+
+# Warn every Nth consecutive queued-but-not-delivered event per destination.
+# 3 is low enough to surface a broken leg the same working session it breaks,
+# high enough that a session merely being away between wakes stays quiet.
+_QUEUE_WARN_EVERY = 3
 _LIVE_ONLY = "live_only"
 VALID_DELIVERY_MODES = frozenset({_LIVE_ONLY}) | _DURABLE_MODES
 
@@ -115,6 +120,11 @@ class Router:
         self._order: list[str] = []
         self._pending_acks: dict[str, asyncio.Future[str]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        # Consecutive queue-instead-of-deliver events per destination, and
+        # whether any subscriber has EVER served that destination this daemon
+        # lifetime. Both feed the silent-accumulation warning below (WI-011).
+        self._consecutive_queued: dict[str, int] = {}
+        self._ever_subscribed: set[str] = set()
 
     @property
     def config(self) -> dict[str, Any]:
@@ -325,6 +335,7 @@ class Router:
                     mode,
                     reason,
                 )
+                self._note_queued_without_delivery(destination)
             else:
                 log.warning(
                     "next-session enqueue refused sender=%s destination=%s "
@@ -341,6 +352,86 @@ class Router:
             destination,
         )
         return "no_subscriber"
+
+    def _note_queued_without_delivery(self, destination: str | None) -> None:
+        """Warn when events pile up for a destination nothing ever serves.
+
+        Durable queueing is a safety net, not a success: ``queued_next_session``
+        looks healthy in logs and to senders, so a delivery leg that is broken
+        end to end (adapter never subscribing, channel never registering) can
+        stay invisible for days while the queue grows — exactly what happened
+        on mvmcc03, where nine wakes accumulated over six days because the
+        Claude adapter's channel was silently skipped by policy (WI-011).
+
+        Two escalating signals, both keyed per destination:
+          * every ``_QUEUE_WARN_EVERY`` consecutive queued-not-delivered events;
+          * emphatically when NO subscriber has served that destination for the
+            daemon's entire lifetime, which means the leg has never worked
+            rather than "the session is briefly away".
+        A successful delivery or a fresh subscription resets the counter.
+        """
+        key = destination or ""
+        count = self._consecutive_queued.get(key, 0) + 1
+        self._consecutive_queued[key] = count
+        if count % _QUEUE_WARN_EVERY:
+            return
+        if key not in self._ever_subscribed:
+            log.warning(
+                "%d event(s) queued for destination=%s and NO subscriber has "
+                "served it since this daemon started — the delivery leg is "
+                "likely broken, not merely idle (check the adapter is running "
+                "and its channel registered)",
+                count,
+                destination,
+            )
+        else:
+            log.warning(
+                "%d consecutive event(s) queued for destination=%s without a "
+                "live delivery; the subscriber has not returned",
+                count,
+                destination,
+            )
+
+    def note_delivered(self, destination: str | None) -> None:
+        """Reset the silent-accumulation counter after a live delivery.
+
+        Deliberately keyed on the successful socket write, not the
+        application-level ack: this detector answers "is anything on the other
+        end of this leg", and a subscriber that accepts frames and NACKs them
+        is present. Delivery-quality problems (persistent NACKs) are a
+        different failure with its own logging in ``_wait_for_ack``; folding
+        them in here would make the outage signal noisier without making it
+        more accurate.
+        """
+        self._consecutive_queued.pop(destination or "", None)
+
+    def prune_warning_state(self) -> None:
+        """Drop warning state for destinations the live config no longer has.
+
+        Called after a config reload. Without this, both collections grow for
+        the daemon's lifetime across reloads, and a destination name that is
+        removed and later re-added inherits a stale "has been subscribed"
+        marker — which would downgrade the loud never-subscribed warning to
+        the soft one for a leg that has, in its new incarnation, never worked.
+        """
+        current = set(addressing.destination_table(self._config))
+        for name in list(self._ever_subscribed):
+            if name not in current:
+                self._ever_subscribed.discard(name)
+        for name in list(self._consecutive_queued):
+            if name and name not in current:
+                self._consecutive_queued.pop(name, None)
+
+    def note_subscribed(self, destinations: Any) -> None:
+        """Record that a subscriber now serves these destinations.
+
+        Called by the socket server on hello_ack. Clears both the
+        never-subscribed marker and the consecutive-queue counter so a
+        reconnect starts from a clean slate.
+        """
+        for name in destinations or ():
+            self._ever_subscribed.add(name)
+            self._consecutive_queued.pop(name, None)
 
     async def drain_pending(self, session_id: str) -> int:
         """Deliver queued events to a session that has just subscribed.
@@ -572,6 +663,7 @@ class Router:
             self._evict(sub.session_id)
             return False
         sub.in_flight += 1
+        self.note_delivered(dest.name)
         log.info(
             "delivered sender=%s destination=%s session=%s ack_id=%s session_id=%s",
             sender_name,

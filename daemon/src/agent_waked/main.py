@@ -270,6 +270,10 @@ def _reload_config(
         len(cfg.get("sources", {})),
         bool(cfg.get("routing")),
     )
+    # Destinations may have disappeared in the new config; drop their
+    # accumulated warning state rather than carrying it for the daemon's
+    # lifetime (WI-011).
+    router.prune_warning_state()
     # Refresh all cached secrets so vault-mode picks up rotations immediately.
     if resolver is not None:
         import asyncio as _asyncio

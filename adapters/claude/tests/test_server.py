@@ -179,3 +179,34 @@ def test_reply_tool_not_connected(monkeypatch):
     result = handle_reply_tool_call({"source": "demo", "content": "hello"})
     assert "reply delivery failed" in str(result)
     assert result.get("isError") is True
+
+
+def _initialize_with(params):
+    """Run initialize with *params* and return the result dict."""
+    captured = []
+
+    import agent_wake_claude.server as srv
+    orig_send = srv.send
+    srv.send = captured.append
+    try:
+        handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params})
+    finally:
+        srv.send = orig_send
+    assert len(captured) == 1
+    return captured[0]["result"]
+
+
+def test_initialize_pins_legacy_protocol_revision_for_modern_offers():
+    """Claude Code >=2.1.x offers a modern MCP revision, and its channel
+    registration skips connections that negotiated one ("no unsolicited
+    notification path"). Echoing the offer silently disabled every wake
+    delivery for six days (WI-011), so the reply must pin the revision the
+    channels research preview speaks regardless of what was offered.
+    """
+    result = _initialize_with({"protocolVersion": "2025-06-18"})
+    assert result["protocolVersion"] == "2025-03-26"
+
+
+def test_initialize_pins_revision_for_older_and_absent_offers():
+    for params in ({"protocolVersion": "2024-11-05"}, {}):
+        assert _initialize_with(params)["protocolVersion"] == "2025-03-26"
