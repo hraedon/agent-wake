@@ -1041,6 +1041,62 @@ describe("handleOpencodeEvent — real event sequences", () => {
     }
   });
 
+  test("orphaned activity marks are bounded (LRU eviction)", async () => {
+    process.env.AW_TEST_SECRET_H6 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H6"] });
+      const { client, fetchImpl } = harness();
+      // Sessions that go busy and never idle or get deleted — stalled runs,
+      // lost terminal events, a server killed mid-turn.
+      for (let i = 0; i < 700; i += 1) {
+        await handleOpencodeEvent(
+          client,
+          { type: "session.status", properties: { sessionID: `ses_orphan_${i}`, status: { type: "busy" } } },
+          cfg,
+          fetchImpl
+        );
+      }
+      expect(_activeSessionCount()).toBeLessThanOrEqual(512);
+      // The most recent session survived eviction and can still notify.
+      expect(
+        activitySessionId({
+          type: "session.status",
+          properties: { sessionID: "ses_orphan_699", status: { type: "busy" } },
+        })
+      ).toBe("ses_orphan_699");
+    } finally {
+      delete process.env.AW_TEST_SECRET_H6;
+    }
+  });
+
+  test("repeat activity refreshes recency so a busy session is not evicted", async () => {
+    process.env.AW_TEST_SECRET_H7 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H7"] });
+      const { client, fetchImpl, calls } = harness();
+      const busy = (id: string) => ({
+        type: "session.status",
+        properties: { sessionID: id, status: { type: "busy" } },
+      });
+      await handleOpencodeEvent(client, busy("ses_1"), cfg, fetchImpl);
+      for (let i = 0; i < 400; i += 1) {
+        await handleOpencodeEvent(client, busy(`ses_filler_${i}`), cfg, fetchImpl);
+        // Keep ses_1 fresh, as a genuinely active session would be.
+        await handleOpencodeEvent(client, busy("ses_1"), cfg, fetchImpl);
+      }
+      for (let i = 400; i < 900; i += 1) {
+        await handleOpencodeEvent(client, busy(`ses_filler_${i}`), cfg, fetchImpl);
+        await handleOpencodeEvent(client, busy("ses_1"), cfg, fetchImpl);
+      }
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H7;
+    }
+  });
+
   test("feature disabled records no activity at all (no unbounded growth)", async () => {
     const { client, fetchImpl, calls } = harness();
     await handleOpencodeEvent(client, statusEvt("busy"), null, fetchImpl);

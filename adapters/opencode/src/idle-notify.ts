@@ -480,17 +480,40 @@ const inFlight = new Set<string>();
  * work that finished hours earlier.
  *
  * "Was this session active while we were watching?" is the precise
- * distinction, and it is cheap: every non-idle event carrying a session id
- * marks that session live, and only a marked session may notify on idle.
- * A replayed idle for a session that has done nothing this lifetime is
- * silently ignored. The mark is consumed on notify, so one completed turn
- * yields exactly one wake.
+ * distinction, and it is cheap: an event proving positive WORK (see
+ * `activitySessionId` — deliberately an allowlist, not "anything that
+ * isn't idle") marks that session live, and only a marked session may
+ * notify on idle. A replayed idle for a session that has done nothing
+ * this lifetime is silently ignored. The mark is consumed on notify, so
+ * one completed turn yields exactly one wake.
+ *
+ * Bounded, insertion-ordered LRU: marks are normally consumed by the
+ * matching `session.idle` (or dropped on `session.deleted`), but a
+ * session can legitimately never produce either — a stalled run, a lost
+ * terminal event, a server killed mid-turn. Without a cap those orphans
+ * accumulate for the process lifetime, and this plugin lives inside
+ * long-running servers. A Map gives O(1) oldest-first eviction; the cap
+ * is far above any plausible concurrent-session count, so eviction only
+ * ever reaches genuine orphans.
  */
-const activeSessions = new Set<string>();
+const activeSessions = new Map<string, true>();
+const MAX_ACTIVE_SESSIONS = 512;
 
 /** Record that a session did something observable in this plugin lifetime. */
 export function noteSessionActivity(sessionId: string): void {
-  if (sessionId) activeSessions.add(sessionId);
+  if (!sessionId) return;
+  // Re-insert so repeat activity refreshes recency.
+  activeSessions.delete(sessionId);
+  activeSessions.set(sessionId, true);
+  while (activeSessions.size > MAX_ACTIVE_SESSIONS) {
+    const oldest = activeSessions.keys().next();
+    if (oldest.done) break;
+    activeSessions.delete(oldest.value);
+    log.warn(
+      `notify-on-idle: activity set at cap (${MAX_ACTIVE_SESSIONS}); evicted oldest session ${oldest.value} ` +
+        `— it will not notify if it later goes idle`
+    );
+  }
 }
 
 /** Forget a session entirely (deletion) — it can never legitimately notify. */
