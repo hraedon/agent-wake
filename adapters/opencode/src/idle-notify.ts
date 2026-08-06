@@ -15,9 +15,9 @@
  * frame — ingest is HTTP-only, gated by HMAC + trigger-identity. Rather
  * than extend the protocol, the adapter signs a normal ingest request.
  * That keeps the daemon's single ingest/gating/dedupe path authoritative.
- * The signing secret is read from the same secrets.env the operator
- * already provisions for the daemon (same user, same trust domain); the
- * inbound wake path continues to hold no secrets.
+ * The signing secret comes from the operator's existing secrets
+ * provisioning (same user, same trust domain); the inbound wake path
+ * continues to hold no secrets.
  *
  * Which sessions notify: only ROOT sessions (no parentID — subagent
  * spawns idle too and would double-fire) whose title contains the
@@ -31,9 +31,17 @@
  * subscriber is DROPPED by the daemon (agent-wake WI-007), and the whole
  * point here is surviving the gap between "reviewer finished" and "the
  * delegating session gets scheduled".
+ *
+ * Loop prevention: if the configured target source routes back to THIS
+ * adapter (the daemon's hello_ack `accepted_sources` is the authority),
+ * a published wake would be delivered into an opencode session, whose
+ * turn would idle and publish again — an unbounded wake/idle loop that
+ * event-id dedupe cannot stop (every cycle mints a fresh id). The
+ * adapter therefore refuses to publish when `cfg.source` is one of its
+ * own accepted sources. See `setAcceptedSources` / index.ts wiring.
  */
 import { createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { log } from "./log";
 
 export interface IdleNotifyConfig {
@@ -42,7 +50,16 @@ export interface IdleNotifyConfig {
   source: string;
   identity: string;
   ingestUrl: string;
-  secretEnv: string;
+  /**
+   * Ordered secret URIs to try when signing (first resolvable wins).
+   * Mirrors the daemon's source vocabulary: after `agent-wake secrets
+   * rotate` a source holds `secrets: ["env://..._SECRET_NEW", "env://..."]`
+   * — newest first. The daemon verifies against ANY entry in the window,
+   * so signing with the first resolvable one is always accepted.
+   * Only env:// URIs are resolvable by this adapter today; other
+   * backends (vault://, file://) are skipped with a warning.
+   */
+  secretUris: string[];
   secretsFile: string | null;
   delivery: "live_only" | "next_session" | "managed_session";
 }
@@ -55,6 +72,31 @@ function defaultSecretEnv(source: string): string {
 
 function defaultSecretsFile(): string | null {
   return process.env.HOME ? `${process.env.HOME}/.config/agent-wake/secrets.env` : null;
+}
+
+/**
+ * Derive the ordered secret-URI list for a source from the same config
+ * document the daemon reads, honoring all three source-vocabulary
+ * spellings (`secrets` list > `secret` uri > `secret_env` name). This is
+ * what keeps the adapter working across `agent-wake secrets rotate`,
+ * which renames the env var and rewrites the source to list form.
+ */
+function secretUrisForSource(raw: any, source: string): string[] {
+  const entry = raw?.sources?.[source] ?? raw?.senders?.[source];
+  if (entry && typeof entry === "object") {
+    if (Array.isArray(entry.secrets) && entry.secrets.length > 0) {
+      return entry.secrets.filter((u: unknown) => typeof u === "string");
+    }
+    if (typeof entry.secret === "string" && entry.secret) {
+      return [entry.secret];
+    }
+    if (typeof entry.secret_env === "string" && entry.secret_env) {
+      return [`env://${entry.secret_env}`];
+    }
+  }
+  // Source not in this config document (or carries no secret spec):
+  // legacy derived-name fallback so a minimal adapter-only config works.
+  return [`env://${defaultSecretEnv(source)}`];
 }
 
 /**
@@ -90,13 +132,20 @@ export function parseIdleNotifyConfig(raw: any): IdleNotifyConfig | null {
     );
   }
 
+  // Explicit block-level secret_env is an operator override; otherwise
+  // resolve from the source's own entry so rotation Just Works.
+  const secretUris =
+    typeof block.secret_env === "string" && block.secret_env
+      ? [`env://${block.secret_env}`]
+      : secretUrisForSource(raw, source);
+
   return {
     enabled: true,
     titleMarker: typeof block.title_marker === "string" ? block.title_marker : "[wake]",
     source,
     identity,
     ingestUrl: typeof block.ingest_url === "string" ? block.ingest_url : "http://127.0.0.1:8788/",
-    secretEnv: typeof block.secret_env === "string" ? block.secret_env : defaultSecretEnv(source),
+    secretUris,
     secretsFile:
       block.secrets_file === null
         ? null
@@ -107,38 +156,25 @@ export function parseIdleNotifyConfig(raw: any): IdleNotifyConfig | null {
   };
 }
 
-/**
- * Resolve the HMAC secret: the secrets.env FILE wins (KEY=VALUE lines,
- * optional `export ` prefix, optional single/double quotes — the subset
- * the daemon's own docs use), with process env only as a fallback when
- * the file is absent or lacks the key.
- *
- * File-over-env is deliberate and load-bearing: the daemon loads its
- * copy via systemd EnvironmentFile=secrets.env, so the file is the
- * source of truth. This plugin runs inside whatever process hosts
- * opencode — typically a long-lived interactive shell whose environment
- * can carry a STALE copy of the secret from before a rotation (observed
- * in production: tmux shell env predated a secrets.env regeneration and
- * every ingest POST 403'd). Read at send time, not cached, so a rotated
- * secret takes effect without a server restart.
- */
-export function resolveSecret(cfg: IdleNotifyConfig): string | null {
-  const fromFile = readSecretFromFile(cfg);
-  if (fromFile) return fromFile;
-  return process.env[cfg.secretEnv] || null;
-}
+type FileLookup =
+  | { state: "found"; value: string }
+  | { state: "empty" } // key present with empty value — explicit tombstone
+  | { state: "absent" } // file readable, key not in it
+  | { state: "no_file" } // file not configured or does not exist
+  | { state: "unreadable" }; // file exists but could not be read — fail closed
 
-function readSecretFromFile(cfg: IdleNotifyConfig): string | null {
-  if (!cfg.secretsFile) return null;
+function lookupSecretInFile(secretsFile: string | null, name: string): FileLookup {
+  if (!secretsFile) return { state: "no_file" };
+  if (!existsSync(secretsFile)) return { state: "no_file" };
   let text: string;
   try {
-    text = readFileSync(cfg.secretsFile, "utf-8");
+    text = readFileSync(secretsFile, "utf-8");
   } catch {
-    return null;
+    return { state: "unreadable" };
   }
   for (const line of text.split("\n")) {
     const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m || m[1] !== cfg.secretEnv) continue;
+    if (!m || m[1] !== name) continue;
     let value = m[2];
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
@@ -146,7 +182,59 @@ function readSecretFromFile(cfg: IdleNotifyConfig): string | null {
     ) {
       value = value.slice(1, -1);
     }
-    return value || null;
+    return value ? { state: "found", value } : { state: "empty" };
+  }
+  return { state: "absent" };
+}
+
+/**
+ * Resolve the HMAC secret by walking `secretUris` in order and returning
+ * the first resolvable value. Per env:// name, the secrets.env FILE wins
+ * and process env is only a fallback when the file does not exist or
+ * lacks the key entirely.
+ *
+ * File-over-env is deliberate and load-bearing: the daemon loads its
+ * copy via systemd EnvironmentFile=secrets.env, so the file is the
+ * source of truth. This plugin runs inside whatever process hosts
+ * opencode — typically a long-lived interactive shell whose environment
+ * can carry a STALE copy of the secret from before a rotation (observed
+ * in production: tmux shell env predated a secrets.env regeneration and
+ * every ingest POST 403'd). Consequently:
+ *   - key present but EMPTY in the file → treated as an explicit
+ *     tombstone; env is NOT consulted for that name.
+ *   - file exists but cannot be read → fail closed for that name (no
+ *     env fallback) — a permission error must not silently downgrade to
+ *     stale-env signing.
+ * Read at send time, not cached, so a rotated secret takes effect
+ * without a server restart.
+ */
+export function resolveSecret(cfg: IdleNotifyConfig): string | null {
+  for (const uri of cfg.secretUris) {
+    if (!uri.startsWith("env://")) {
+      log.warn(`notify-on-idle: unsupported secret backend ${JSON.stringify(uri)}; skipping`);
+      continue;
+    }
+    const name = uri.slice("env://".length);
+    if (!name) continue;
+    const fromFile = lookupSecretInFile(cfg.secretsFile, name);
+    switch (fromFile.state) {
+      case "found":
+        return fromFile.value;
+      case "empty":
+      case "unreadable":
+        if (fromFile.state === "unreadable") {
+          log.warn(
+            `notify-on-idle: secrets file ${cfg.secretsFile} exists but is unreadable; failing closed for ${name}`
+          );
+        }
+        continue; // no env fallback for this name
+      case "absent":
+      case "no_file": {
+        const fromEnv = process.env[name];
+        if (fromEnv) return fromEnv;
+        continue;
+      }
+    }
   }
   return null;
 }
@@ -204,21 +292,66 @@ export function signBody(body: string, secret: string): string {
 /** Injectable fetch so tests don't need a live daemon. */
 export type FetchLike = (url: string, init: any) => Promise<{ status: number; text(): Promise<string> }>;
 
+const POST_TIMEOUT_MS = 10_000;
+
+/**
+ * Sources the daemon routes to THIS adapter, per the most recent
+ * hello_ack. Publishing as one of these would deliver the wake straight
+ * back into opencode — see the loop-prevention note in the module
+ * docstring. index.ts updates this on every (re)subscribe.
+ */
+let acceptedSources: ReadonlySet<string> = new Set();
+let loopWarned = false;
+
+export function setAcceptedSources(sources: readonly string[]): void {
+  acceptedSources = new Set(sources);
+  loopWarned = false;
+}
+
+/** Test-only. */
+export function _resetLoopGuard(): void {
+  acceptedSources = new Set();
+  loopWarned = false;
+}
+
+/** Sessions with a POST already in flight — suppress concurrent duplicates. */
+const inFlight = new Set<string>();
+
 export async function postIdleEvent(
   info: IdleSessionInfo,
   cfg: IdleNotifyConfig,
   fetchImpl: FetchLike = fetch as unknown as FetchLike
 ): Promise<boolean> {
+  if (acceptedSources.has(cfg.source)) {
+    if (!loopWarned) {
+      loopWarned = true;
+      log.error(
+        `notify-on-idle: refusing to publish as source ${JSON.stringify(cfg.source)} — ` +
+          `the daemon routes that source back to this opencode adapter (accepted_sources), ` +
+          `which would create a wake/idle feedback loop. Point opencode_notify_on_idle.source ` +
+          `at a source routed to a different adapter.`
+      );
+    }
+    return false;
+  }
+
+  if (inFlight.has(info.id)) {
+    log.warn(`notify-on-idle: publish already in flight for session ${info.id}; skipping duplicate`);
+    return false;
+  }
+
   const secret = resolveSecret(cfg);
   if (!secret) {
     log.warn(
-      `notify-on-idle: no secret available (env ${cfg.secretEnv}, file ${cfg.secretsFile ?? "<none>"}); dropping wake for session ${info.id}`
+      `notify-on-idle: no signing secret resolvable from ${JSON.stringify(cfg.secretUris)} ` +
+        `(file ${cfg.secretsFile ?? "<none>"}); dropping wake for session ${info.id}`
     );
     return false;
   }
 
   const { body, eventId } = buildIdleEvent(info, cfg);
   const sig = signBody(body, secret);
+  inFlight.add(info.id);
   try {
     const res = await fetchImpl(cfg.ingestUrl, {
       method: "POST",
@@ -229,6 +362,7 @@ export async function postIdleEvent(
         "X-AgentWake-Signature": `sha256=${sig}`,
       },
       body,
+      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
     });
     if (res.status >= 200 && res.status < 300) {
       log.info(
@@ -244,6 +378,8 @@ export async function postIdleEvent(
   } catch (e: any) {
     log.warn(`notify-on-idle: ingest POST failed for session ${info.id}: ${e?.message ?? e}`);
     return false;
+  } finally {
+    inFlight.delete(info.id);
   }
 }
 

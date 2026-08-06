@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
@@ -12,6 +12,8 @@ import {
   newEventId,
   postIdleEvent,
   handleSessionIdle,
+  setAcceptedSources,
+  _resetLoopGuard,
   IdleNotifyConfigError,
   type IdleNotifyConfig,
 } from "../src/idle-notify";
@@ -23,12 +25,23 @@ function cfgWith(overrides: Partial<IdleNotifyConfig> = {}): IdleNotifyConfig {
     source: "demo-claude",
     identity: "human:demo",
     ingestUrl: "http://127.0.0.1:8788/",
-    secretEnv: "AGENT_WAKE_DEMO_CLAUDE_SECRET",
+    secretUris: ["env://AGENT_WAKE_DEMO_CLAUDE_SECRET"],
     secretsFile: null,
     delivery: "next_session",
     ...overrides,
   };
 }
+
+function tmpSecretsFile(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "aw-oc-idle-"));
+  const file = join(dir, "secrets.env");
+  writeFileSync(file, content);
+  return file;
+}
+
+afterEach(() => {
+  _resetLoopGuard();
+});
 
 describe("parseIdleNotifyConfig", () => {
   test("absent block means feature off", () => {
@@ -52,13 +65,12 @@ describe("parseIdleNotifyConfig", () => {
     ).toThrow(IdleNotifyConfigError);
   });
 
-  test("defaults: marker, ingest url, derived secret_env, next_session", () => {
+  test("defaults: marker, ingest url, next_session", () => {
     const cfg = parseIdleNotifyConfig({
       opencode_notify_on_idle: { source: "mvmcc03-claude", identity: "mvmcc03-agent" },
     })!;
     expect(cfg.titleMarker).toBe("[wake]");
     expect(cfg.ingestUrl).toBe("http://127.0.0.1:8788/");
-    expect(cfg.secretEnv).toBe("AGENT_WAKE_MVMCC03_CLAUDE_SECRET");
     expect(cfg.delivery).toBe("next_session");
   });
 
@@ -69,16 +81,74 @@ describe("parseIdleNotifyConfig", () => {
       })
     ).toThrow(/delivery/);
   });
+
+  describe("secret URI resolution (rotation contract)", () => {
+    test("post-rotation 'secrets' list from the source entry is used verbatim, newest first", () => {
+      const cfg = parseIdleNotifyConfig({
+        sources: {
+          "demo-claude": {
+            secrets: ["env://AGENT_WAKE_DEMO_SECRET_NEW", "env://AGENT_WAKE_DEMO_SECRET"],
+          },
+        },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })!;
+      expect(cfg.secretUris).toEqual([
+        "env://AGENT_WAKE_DEMO_SECRET_NEW",
+        "env://AGENT_WAKE_DEMO_SECRET",
+      ]);
+    });
+
+    test("source entry 'secret_env' spelling resolves", () => {
+      const cfg = parseIdleNotifyConfig({
+        sources: { "demo-claude": { secret_env: "AGENT_WAKE_DEMO_SECRET" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })!;
+      expect(cfg.secretUris).toEqual(["env://AGENT_WAKE_DEMO_SECRET"]);
+    });
+
+    test("source entry 'secret' uri spelling resolves", () => {
+      const cfg = parseIdleNotifyConfig({
+        sources: { "demo-claude": { secret: "env://SOME_NAME" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })!;
+      expect(cfg.secretUris).toEqual(["env://SOME_NAME"]);
+    });
+
+    test("v2 'senders' vocabulary is honored", () => {
+      const cfg = parseIdleNotifyConfig({
+        senders: { "demo-claude": { secret_env: "FROM_SENDERS" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      })!;
+      expect(cfg.secretUris).toEqual(["env://FROM_SENDERS"]);
+    });
+
+    test("explicit block-level secret_env overrides the source entry", () => {
+      const cfg = parseIdleNotifyConfig({
+        sources: { "demo-claude": { secrets: ["env://ROTATED"] } },
+        opencode_notify_on_idle: {
+          source: "demo-claude",
+          identity: "i",
+          secret_env: "OPERATOR_OVERRIDE",
+        },
+      })!;
+      expect(cfg.secretUris).toEqual(["env://OPERATOR_OVERRIDE"]);
+    });
+
+    test("unknown source falls back to the derived name", () => {
+      const cfg = parseIdleNotifyConfig({
+        opencode_notify_on_idle: { source: "mvmcc03-claude", identity: "i" },
+      })!;
+      expect(cfg.secretUris).toEqual(["env://AGENT_WAKE_MVMCC03_CLAUDE_SECRET"]);
+    });
+  });
 });
 
 describe("resolveSecret", () => {
   test("file wins over a stale env copy", () => {
     process.env.AW_TEST_SECRET_A = "stale-from-env";
     try {
-      const dir = mkdtempSync(join(tmpdir(), "aw-oc-idle-"));
-      const file = join(dir, "secrets.env");
-      writeFileSync(file, "AW_TEST_SECRET_A=fresh-from-file\n");
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_A", secretsFile: file });
+      const file = tmpSecretsFile("AW_TEST_SECRET_A=fresh-from-file\n");
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_A"], secretsFile: file });
       expect(resolveSecret(cfg)).toBe("fresh-from-file");
     } finally {
       delete process.env.AW_TEST_SECRET_A;
@@ -88,7 +158,10 @@ describe("resolveSecret", () => {
   test("env is the fallback when the file is missing", () => {
     process.env.AW_TEST_SECRET_A2 = "from-env";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_A2", secretsFile: "/nonexistent" });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_A2"],
+        secretsFile: "/nonexistent",
+      });
       expect(resolveSecret(cfg)).toBe("from-env");
     } finally {
       delete process.env.AW_TEST_SECRET_A2;
@@ -96,18 +169,70 @@ describe("resolveSecret", () => {
   });
 
   test("reads KEY=VALUE, export prefix, and quotes from secrets file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "aw-oc-idle-"));
-    const file = join(dir, "secrets.env");
-    writeFileSync(
-      file,
+    const file = tmpSecretsFile(
       ["# comment", "OTHER=zzz", 'export AW_TEST_SECRET_B="s3cret"', ""].join("\n")
     );
-    const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_B", secretsFile: file });
+    const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_B"], secretsFile: file });
     expect(resolveSecret(cfg)).toBe("s3cret");
   });
 
-  test("returns null when nothing available", () => {
-    const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_MISSING", secretsFile: null });
+  test("walks the rotation window: first uri unresolvable, second resolves", () => {
+    const file = tmpSecretsFile("AW_TEST_ROT_OLD=old-but-valid\n");
+    const cfg = cfgWith({
+      secretUris: ["env://AW_TEST_ROT_NEW", "env://AW_TEST_ROT_OLD"],
+      secretsFile: file,
+    });
+    expect(resolveSecret(cfg)).toBe("old-but-valid");
+  });
+
+  test("post-rotation file resolves the NEW name first", () => {
+    const file = tmpSecretsFile("AW_TEST_ROT2=old\nAW_TEST_ROT2_NEW=new\n");
+    const cfg = cfgWith({
+      secretUris: ["env://AW_TEST_ROT2_NEW", "env://AW_TEST_ROT2"],
+      secretsFile: file,
+    });
+    expect(resolveSecret(cfg)).toBe("new");
+  });
+
+  test("empty value in file is a tombstone — env NOT consulted for that name", () => {
+    process.env.AW_TEST_SECRET_T = "stale";
+    try {
+      const file = tmpSecretsFile("AW_TEST_SECRET_T=\n");
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_T"], secretsFile: file });
+      expect(resolveSecret(cfg)).toBeNull();
+    } finally {
+      delete process.env.AW_TEST_SECRET_T;
+    }
+  });
+
+  test("unreadable existing file fails closed (no env fallback)", () => {
+    process.env.AW_TEST_SECRET_U = "stale";
+    try {
+      const file = tmpSecretsFile("AW_TEST_SECRET_U=fresh\n");
+      chmodSync(file, 0o000);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_U"], secretsFile: file });
+      expect(resolveSecret(cfg)).toBeNull();
+      chmodSync(file, 0o600);
+    } finally {
+      delete process.env.AW_TEST_SECRET_U;
+    }
+  });
+
+  test("non-env backends are skipped", () => {
+    process.env.AW_TEST_SECRET_V = "from-env";
+    try {
+      const cfg = cfgWith({
+        secretUris: ["vault://kv/agent-wake#demo", "env://AW_TEST_SECRET_V"],
+        secretsFile: null,
+      });
+      expect(resolveSecret(cfg)).toBe("from-env");
+    } finally {
+      delete process.env.AW_TEST_SECRET_V;
+    }
+  });
+
+  test("returns null when nothing resolvable", () => {
+    const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_MISSING"], secretsFile: null });
     expect(resolveSecret(cfg)).toBeNull();
   });
 });
@@ -165,10 +290,10 @@ describe("buildIdleEvent / signBody", () => {
 });
 
 describe("postIdleEvent", () => {
-  test("posts signed request with source/identity headers", async () => {
+  test("posts signed request with source/identity headers and a timeout signal", async () => {
     process.env.AW_TEST_SECRET_C = "topsecret";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_C" });
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_C"] });
       let captured: { url: string; init: any } | null = null;
       const fetchImpl = async (url: string, init: any) => {
         captured = { url, init };
@@ -184,13 +309,14 @@ describe("postIdleEvent", () => {
         .update(captured!.init.body)
         .digest("hex");
       expect(headers["X-AgentWake-Signature"]).toBe(`sha256=${expectedSig}`);
+      expect(captured!.init.signal).toBeInstanceOf(AbortSignal);
     } finally {
       delete process.env.AW_TEST_SECRET_C;
     }
   });
 
   test("missing secret drops without posting", async () => {
-    const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_MISSING", secretsFile: null });
+    const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_MISSING"], secretsFile: null });
     let called = false;
     const fetchImpl = async () => {
       called = true;
@@ -204,12 +330,68 @@ describe("postIdleEvent", () => {
   test("non-2xx ingest response returns false", async () => {
     process.env.AW_TEST_SECRET_D = "k";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_D" });
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_D"] });
       const fetchImpl = async () => ({ status: 403, text: async () => "denied" });
       const ok = await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl);
       expect(ok).toBe(false);
     } finally {
       delete process.env.AW_TEST_SECRET_D;
+    }
+  });
+
+  test("refuses to publish as a source routed back to this adapter (loop guard)", async () => {
+    process.env.AW_TEST_SECRET_L = "k";
+    try {
+      setAcceptedSources(["demo-opencode", "demo-claude"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_L"], source: "demo-claude" });
+      let called = false;
+      const fetchImpl = async () => {
+        called = true;
+        return { status: 202, text: async () => "" };
+      };
+      const ok = await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl);
+      expect(ok).toBe(false);
+      expect(called).toBe(false);
+    } finally {
+      delete process.env.AW_TEST_SECRET_L;
+    }
+  });
+
+  test("publishes normally when accepted sources do not include the target", async () => {
+    process.env.AW_TEST_SECRET_L2 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_L2"], source: "demo-claude" });
+      const fetchImpl = async () => ({ status: 202, text: async () => "" });
+      const ok = await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl);
+      expect(ok).toBe(true);
+    } finally {
+      delete process.env.AW_TEST_SECRET_L2;
+    }
+  });
+
+  test("suppresses a concurrent duplicate for the same session", async () => {
+    process.env.AW_TEST_SECRET_F2 = "k";
+    try {
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_F2"] });
+      let calls = 0;
+      let release: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const fetchImpl = async () => {
+        calls += 1;
+        await gate;
+        return { status: 202, text: async () => "" };
+      };
+      const first = postIdleEvent({ id: "same", title: "[wake]" }, cfg, fetchImpl);
+      const second = await postIdleEvent({ id: "same", title: "[wake]" }, cfg, fetchImpl);
+      expect(second).toBe(false);
+      release!();
+      expect(await first).toBe(true);
+      expect(calls).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_F2;
     }
   });
 });
@@ -220,7 +402,7 @@ describe("handleSessionIdle", () => {
   test("fetches session, gates on marker, posts when matched", async () => {
     process.env.AW_TEST_SECRET_E = "k";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_E" });
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_E"] });
       let posted = false;
       const fetchImpl = async () => {
         posted = true;
@@ -255,7 +437,7 @@ describe("handleSessionIdle", () => {
   test("skips when title lacks marker", async () => {
     process.env.AW_TEST_SECRET_F = "k";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_F" });
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_F"] });
       let posted = false;
       const fetchImpl = async () => {
         posted = true;
@@ -274,7 +456,7 @@ describe("handleSessionIdle", () => {
   test("SDK error envelope is handled without posting", async () => {
     process.env.AW_TEST_SECRET_G = "k";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_G" });
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_G"] });
       let posted = false;
       const fetchImpl = async () => {
         posted = true;

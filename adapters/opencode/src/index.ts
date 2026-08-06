@@ -33,7 +33,7 @@ import { loadConfig, type Config } from "./config";
 import { runClient, defaultSocketPath, type WakeEvent } from "./client";
 import { deliverWake, type OpencodeClientLike } from "./wake";
 import { executeReply } from "./reply";
-import { handleSessionIdle, type IdleNotifyConfig } from "./idle-notify";
+import { handleSessionIdle, setAcceptedSources, type IdleNotifyConfig } from "./idle-notify";
 import {
   subscribe as labelSubscribe,
   unsubscribe as labelUnsubscribe,
@@ -72,6 +72,7 @@ function ensureClientStarted(): void {
     stopClient = runClient({
       socketPath,
       sources: config.sources,
+      onAcceptedSources: setAcceptedSources,
       onWake: async (event: WakeEvent) => {
         if (!sdkClient?.session) {
           log.warn("dropping wake event: opencode client unavailable");

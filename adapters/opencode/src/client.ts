@@ -40,6 +40,12 @@ export interface ClientOptions {
   sources: string[];
   instance?: string;
   onWake: WakeHandler;
+  /**
+   * Called with hello_ack's accepted_sources on every (re)subscribe —
+   * the daemon's authoritative list of sources routed to this adapter.
+   * idle-notify uses it as a feedback-loop guard.
+   */
+  onAcceptedSources?: (sources: string[]) => void;
   /** Initial backoff in ms (defaults to 1000). Tests use a small value. */
   initialBackoffMs?: number;
   /** Maximum backoff in ms (defaults to 30000). */
@@ -178,6 +184,13 @@ async function handleFrame(
     log.info(
       `subscribed, session_id=${frame.session_id} accepted_sources=${JSON.stringify(frame.accepted_sources)}`
     );
+    if (opts.onAcceptedSources && Array.isArray(frame.accepted_sources)) {
+      try {
+        opts.onAcceptedSources(frame.accepted_sources.filter((s: unknown) => typeof s === "string"));
+      } catch (e: any) {
+        log.warn(`onAcceptedSources handler failed: ${e?.message ?? e}`);
+      }
+    }
   } else if (t === "wake") {
     const ackId = frame.ack_id;
     const event = frame.event ?? {};
