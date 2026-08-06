@@ -108,14 +108,27 @@ export function parseIdleNotifyConfig(raw: any): IdleNotifyConfig | null {
 }
 
 /**
- * Resolve the HMAC secret: process env wins, then the secrets.env file
- * (KEY=VALUE lines, optional `export ` prefix, optional single/double
- * quotes — the subset the daemon's own docs use). Read at send time, not
- * cached, so a rotated secret takes effect without a server restart.
+ * Resolve the HMAC secret: the secrets.env FILE wins (KEY=VALUE lines,
+ * optional `export ` prefix, optional single/double quotes — the subset
+ * the daemon's own docs use), with process env only as a fallback when
+ * the file is absent or lacks the key.
+ *
+ * File-over-env is deliberate and load-bearing: the daemon loads its
+ * copy via systemd EnvironmentFile=secrets.env, so the file is the
+ * source of truth. This plugin runs inside whatever process hosts
+ * opencode — typically a long-lived interactive shell whose environment
+ * can carry a STALE copy of the secret from before a rotation (observed
+ * in production: tmux shell env predated a secrets.env regeneration and
+ * every ingest POST 403'd). Read at send time, not cached, so a rotated
+ * secret takes effect without a server restart.
  */
 export function resolveSecret(cfg: IdleNotifyConfig): string | null {
-  const fromEnv = process.env[cfg.secretEnv];
-  if (fromEnv) return fromEnv;
+  const fromFile = readSecretFromFile(cfg);
+  if (fromFile) return fromFile;
+  return process.env[cfg.secretEnv] || null;
+}
+
+function readSecretFromFile(cfg: IdleNotifyConfig): string | null {
   if (!cfg.secretsFile) return null;
   let text: string;
   try {

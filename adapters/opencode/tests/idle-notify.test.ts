@@ -72,13 +72,26 @@ describe("parseIdleNotifyConfig", () => {
 });
 
 describe("resolveSecret", () => {
-  test("env var wins", () => {
-    process.env.AW_TEST_SECRET_A = "from-env";
+  test("file wins over a stale env copy", () => {
+    process.env.AW_TEST_SECRET_A = "stale-from-env";
     try {
-      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_A", secretsFile: "/nonexistent" });
-      expect(resolveSecret(cfg)).toBe("from-env");
+      const dir = mkdtempSync(join(tmpdir(), "aw-oc-idle-"));
+      const file = join(dir, "secrets.env");
+      writeFileSync(file, "AW_TEST_SECRET_A=fresh-from-file\n");
+      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_A", secretsFile: file });
+      expect(resolveSecret(cfg)).toBe("fresh-from-file");
     } finally {
       delete process.env.AW_TEST_SECRET_A;
+    }
+  });
+
+  test("env is the fallback when the file is missing", () => {
+    process.env.AW_TEST_SECRET_A2 = "from-env";
+    try {
+      const cfg = cfgWith({ secretEnv: "AW_TEST_SECRET_A2", secretsFile: "/nonexistent" });
+      expect(resolveSecret(cfg)).toBe("from-env");
+    } finally {
+      delete process.env.AW_TEST_SECRET_A2;
     }
   });
 
