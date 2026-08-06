@@ -54,13 +54,48 @@ and listen host/port are daemon-side concerns.
 
 ## Run as a Claude Code channel
 
-```bash
-claude --dangerously-load-development-channels server:agent-wake-claude
-```
+Three things must all be true, and Claude Code reports none of them
+unless you ask for debug output (`--debug-file <path>`, then grep for
+`Channel notifications`):
+
+1. **The server is registered as an MCP server.** The `--channels` flag
+   selects among registered servers; it does not itself define one:
+
+   ```bash
+   claude mcp add agent-wake-claude -s user -- ~/.local/bin/agent-wake-claude
+   ```
+
+2. **Channels are enabled by org policy.** On Team/Enterprise accounts
+   the default is off, and the only symptom is a debug line reading
+   `channels not enabled by org policy`. Enable it in managed settings:
+
+   ```bash
+   sudo mkdir -p /etc/claude-code
+   echo '{"channelsEnabled": true}' | sudo tee /etc/claude-code/managed-settings.json
+   ```
+
+3. **The session is started with the dev-channel flag**, and the
+   first-run confirmation prompt is accepted (an unattended session sits
+   at that prompt forever, which looks exactly like a silent failure):
+
+   ```bash
+   claude --dangerously-load-development-channels server:agent-wake-claude
+   ```
+
+A healthy startup logs `MCP server "agent-wake-claude": Channel
+notifications registered` and the daemon logs `adapter subscribed
+... adapter=claude`. If the daemon logs neither that nor any delivery
+while `agent-wake pending list` grows, the leg is broken — see the
+router's silent-accumulation warning (WI-011).
 
 Claude Code spawns `agent-wake-claude` as a subprocess.  The adapter
 connects to the daemon over the unix socket and relays wake events as
 MCP channel notifications.
+
+The MCP `initialize` reply pins protocol revision `2025-03-26` rather
+than echoing the client's offer: Claude Code's channel registration
+skips connections that negotiated a modern revision "with no unsolicited
+notification path", which silently disables every wake (WI-011).
 
 If the daemon is not running when the adapter starts, it logs a
 reconnect warning and retries with exponential backoff (1 s → 30 s cap).
