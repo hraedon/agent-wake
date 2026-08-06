@@ -34,7 +34,7 @@ import { runClient, defaultSocketPath, type WakeEvent } from "./client";
 import { deliverWake, type OpencodeClientLike } from "./wake";
 import { executeReply } from "./reply";
 import {
-  handleSessionIdle,
+  handleOpencodeEvent,
   invalidateAcceptedSources,
   setAcceptedSources,
   type IdleNotifyConfig,
@@ -198,16 +198,12 @@ export default async function plugin(ctx: PluginContext): Promise<Hooks> {
         }
       }
       const evt = input?.event ?? input;
-      if (evt?.type === "session.idle" && typeof evt?.properties?.sessionID === "string") {
-        // Fire-and-forget: never let a notify failure break event handling.
-        void handleSessionIdle(
-          savedCtx?.client,
-          evt.properties.sessionID,
-          notifyOnIdleConfig
-        ).catch((e: any) =>
-          log.warn(`notify-on-idle: unhandled error: ${e?.message ?? e}`)
-        );
-      }
+      // Activity tracking + idle notification both live in idle-notify so the
+      // exact event sequence opencode emits can be tested end to end.
+      // Fire-and-forget: never let a notify failure break event handling.
+      void handleOpencodeEvent(savedCtx?.client, evt, notifyOnIdleConfig).catch(
+        (e: any) => log.warn(`notify-on-idle: unhandled error: ${e?.message ?? e}`)
+      );
     },
     tool: {
       agent_wake_reply: agentWakeReply,

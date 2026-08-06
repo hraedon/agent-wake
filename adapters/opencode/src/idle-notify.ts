@@ -470,6 +470,121 @@ export function _resetLoopGuard(): void {
 /** Sessions with a POST already in flight — suppress concurrent duplicates. */
 const inFlight = new Set<string>();
 
+/**
+ * Sessions this plugin instance has watched do actual work.
+ *
+ * opencode replays `session.idle` for PRE-EXISTING sessions when a harness
+ * starts: launching the TUI on this host fired idle for all nine historical
+ * `[wake]`-titled sessions at once, and notify-on-idle dutifully re-published
+ * a wake for every one — a stale-notification storm on every restart, for
+ * work that finished hours earlier.
+ *
+ * "Was this session active while we were watching?" is the precise
+ * distinction, and it is cheap: an event proving positive WORK (see
+ * `activitySessionId` — deliberately an allowlist, not "anything that
+ * isn't idle") marks that session live, and only a marked session may
+ * notify on idle. A replayed idle for a session that has done nothing
+ * this lifetime is silently ignored. The mark is consumed on notify, so
+ * one completed turn yields exactly one wake.
+ *
+ * Bounded, insertion-ordered LRU: marks are normally consumed by the
+ * matching `session.idle` (or dropped on `session.deleted`), but a
+ * session can legitimately never produce either — a stalled run, a lost
+ * terminal event, a server killed mid-turn. Without a cap those orphans
+ * accumulate for the process lifetime, and this plugin lives inside
+ * long-running servers. A Map gives O(1) oldest-first eviction; the cap
+ * is far above any plausible concurrent-session count, so eviction only
+ * ever reaches genuine orphans.
+ */
+const activeSessions = new Map<string, true>();
+const MAX_ACTIVE_SESSIONS = 512;
+
+/** Record that a session did something observable in this plugin lifetime. */
+export function noteSessionActivity(sessionId: string): void {
+  if (!sessionId) return;
+  // Re-insert so repeat activity refreshes recency.
+  activeSessions.delete(sessionId);
+  activeSessions.set(sessionId, true);
+  while (activeSessions.size > MAX_ACTIVE_SESSIONS) {
+    const oldest = activeSessions.keys().next();
+    if (oldest.done) break;
+    activeSessions.delete(oldest.value);
+    noteEviction(oldest.value);
+  }
+}
+
+/**
+ * Eviction logging, summarized rather than per-session.
+ *
+ * Being at the cap is a sustained condition, not an event: once there, every
+ * subsequent mark evicts one, so per-session warnings would emit thousands of
+ * identical lines and bury everything else in the log. One line per
+ * `_EVICTION_LOG_EVERY` evictions carries the same information — the
+ * condition, its scale, and a representative session.
+ */
+const _EVICTION_LOG_EVERY = 100;
+let evictionCount = 0;
+
+function noteEviction(sessionId: string): void {
+  evictionCount += 1;
+  if (evictionCount % _EVICTION_LOG_EVERY !== 1) return;
+  log.warn(
+    `notify-on-idle: activity set at cap (${MAX_ACTIVE_SESSIONS}); ` +
+      `${evictionCount} eviction(s) so far, most recently session ${sessionId} — ` +
+      `evicted sessions will not notify if they later go idle`
+  );
+}
+
+/** Forget a session entirely (deletion) — it can never legitimately notify. */
+export function forgetSession(sessionId: string): void {
+  activeSessions.delete(sessionId);
+}
+
+/** Test-only. */
+export function _resetActivity(): void {
+  activeSessions.clear();
+  evictionCount = 0;
+}
+
+/** Test-only. */
+export function _activeSessionCount(): number {
+  return activeSessions.size;
+}
+
+/**
+ * The session id an event proves is WORKING, or null.
+ *
+ * Deliberately an allowlist of positive-work signals rather than
+ * "anything that isn't session.idle". `SessionStatus` has an `idle`
+ * variant, and opencode emits `session.status {type:"idle"}` immediately
+ * before the `session.idle` event — so a negative filter would mark the
+ * session active microseconds before the idle it is meant to suppress,
+ * silently defeating the entire replay guard (caught in review). Session
+ * lifecycle events (created/updated/deleted) are metadata, not work, and
+ * are excluded for the same reason: a startup replay announces them.
+ */
+export function activitySessionId(evt: any): string | null {
+  const type = evt?.type;
+  const props = evt?.properties ?? {};
+  switch (type) {
+    case "session.status": {
+      const status = props?.status?.type;
+      if (status !== "busy" && status !== "retry") return null;
+      return typeof props.sessionID === "string" ? props.sessionID : null;
+    }
+    case "message.updated": {
+      const id = props?.info?.sessionID;
+      return typeof id === "string" ? id : null;
+    }
+    case "message.part.updated": {
+      const id = props?.part?.sessionID;
+      return typeof id === "string" ? id : null;
+    }
+    default:
+      return null;
+  }
+}
+
 export async function postIdleEvent(
   info: IdleSessionInfo,
   cfg: IdleNotifyConfig,
@@ -544,6 +659,47 @@ export interface SessionGetClientLike {
   };
 }
 
+/**
+ * Single entry point for the plugin's event hook: classify the event, track
+ * activity, and notify on a genuine idle.
+ *
+ * Lives here rather than in index.ts so tests can drive REAL opencode event
+ * objects through the same code the plugin runs — the review that caught the
+ * `session.status{idle}` hole noted that testing the pieces separately could
+ * never have caught it.
+ *
+ * Activity is tracked only while the feature is enabled: with `cfg` null
+ * nothing consumes the marks, so recording them would grow the set for the
+ * process lifetime with no consumer.
+ */
+export async function handleOpencodeEvent(
+  client: SessionGetClientLike | undefined,
+  evt: any,
+  cfg: IdleNotifyConfig | null,
+  fetchImpl?: FetchLike
+): Promise<void> {
+  if (!cfg) return;
+
+  const activeId = activitySessionId(evt);
+  if (activeId) {
+    noteSessionActivity(activeId);
+    return;
+  }
+
+  if (evt?.type === "session.deleted") {
+    const deleted =
+      (typeof evt?.properties?.info?.id === "string" && evt.properties.info.id) ||
+      (typeof evt?.properties?.sessionID === "string" && evt.properties.sessionID) ||
+      null;
+    if (deleted) forgetSession(deleted);
+    return;
+  }
+
+  if (evt?.type === "session.idle" && typeof evt?.properties?.sessionID === "string") {
+    await handleSessionIdle(client, evt.properties.sessionID, cfg, fetchImpl);
+  }
+}
+
 export async function handleSessionIdle(
   client: SessionGetClientLike | undefined,
   sessionID: string,
@@ -551,6 +707,15 @@ export async function handleSessionIdle(
   fetchImpl?: FetchLike
 ): Promise<void> {
   if (!cfg) return;
+  // Startup replay guard: an idle for a session we never watched work is
+  // history being re-announced, not a completion. Consume the mark so one
+  // turn produces exactly one wake.
+  if (!activeSessions.delete(sessionID)) {
+    log.info(
+      `notify-on-idle: ignoring idle for session ${sessionID} — no activity observed this plugin lifetime (startup replay)`
+    );
+    return;
+  }
   if (!client?.session?.get) {
     log.warn("notify-on-idle: opencode client unavailable; cannot inspect idle session");
     return;

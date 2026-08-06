@@ -14,6 +14,11 @@ import {
   handleSessionIdle,
   setAcceptedSources,
   invalidateAcceptedSources,
+  noteSessionActivity,
+  handleOpencodeEvent,
+  activitySessionId,
+  _activeSessionCount,
+  _resetActivity,
   _resetLoopGuard,
   IdleNotifyConfigError,
   type IdleNotifyConfig,
@@ -55,6 +60,7 @@ function tmpSecretsFile(content: string): string {
 
 afterEach(() => {
   _resetLoopGuard();
+  _resetActivity();
 });
 
 describe("parseIdleNotifyConfig", () => {
@@ -746,6 +752,7 @@ describe("handleSessionIdle", () => {
           get: async () => sdkEnvelope({ id: "ses_z", title: "[wake] review", directory: "/r" }),
         },
       };
+      noteSessionActivity("ses_z");
       await handleSessionIdle(client, "ses_z", cfg, fetchImpl);
       expect(posted).toBe(true);
     } finally {
@@ -779,6 +786,7 @@ describe("handleSessionIdle", () => {
       const client = {
         session: { get: async () => sdkEnvelope({ id: "s", title: "plain title" }) },
       };
+      noteSessionActivity("s");
       await handleSessionIdle(client, "s", cfg, fetchImpl);
       expect(posted).toBe(false);
     } finally {
@@ -800,10 +808,327 @@ describe("handleSessionIdle", () => {
           get: async () => ({ data: undefined, error: { message: "not found" }, response: { status: 404 } }),
         },
       };
+      noteSessionActivity("gone");
       await handleSessionIdle(client, "gone", cfg, fetchImpl);
       expect(posted).toBe(false);
     } finally {
       delete process.env.AW_TEST_SECRET_G;
     }
+  });
+});
+
+describe("startup replay guard", () => {
+  const sdkEnvelope = (data: any) => ({ data, error: undefined, response: { status: 200 } });
+
+  test("idle for a session never observed active is ignored (no session.get, no post)", async () => {
+    process.env.AW_TEST_SECRET_R = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_R"] });
+      let fetched = false;
+      let posted = false;
+      const client = {
+        session: {
+          get: async () => {
+            fetched = true;
+            return sdkEnvelope({ id: "ses_old", title: "[wake] yesterday's review" });
+          },
+        },
+      };
+      const fetchImpl = async () => {
+        posted = true;
+        return { status: 202, text: async () => "" };
+      };
+      // No noteSessionActivity: this is opencode replaying a historical idle
+      // at harness startup, which re-published nine stale wakes in production.
+      await handleSessionIdle(client, "ses_old", cfg, fetchImpl);
+      expect(fetched).toBe(false);
+      expect(posted).toBe(false);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R;
+    }
+  });
+
+  test("a session observed active notifies exactly once per turn", async () => {
+    process.env.AW_TEST_SECRET_R2 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_R2"] });
+      let posts = 0;
+      const client = {
+        session: { get: async () => sdkEnvelope({ id: "ses_live", title: "[wake] now" }) },
+      };
+      const fetchImpl = async () => {
+        posts += 1;
+        return { status: 202, text: async () => "" };
+      };
+
+      noteSessionActivity("ses_live");
+      await handleSessionIdle(client, "ses_live", cfg, fetchImpl);
+      expect(posts).toBe(1);
+
+      // A duplicate idle with no new activity must not re-notify.
+      await handleSessionIdle(client, "ses_live", cfg, fetchImpl);
+      expect(posts).toBe(1);
+
+      // The next turn marks activity again and earns its own wake.
+      noteSessionActivity("ses_live");
+      await handleSessionIdle(client, "ses_live", cfg, fetchImpl);
+      expect(posts).toBe(2);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R2;
+    }
+  });
+
+  test("activity marks are per session", async () => {
+    process.env.AW_TEST_SECRET_R3 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_R3"] });
+      let posts = 0;
+      const client = {
+        session: { get: async () => sdkEnvelope({ id: "ses_a", title: "[wake] a" }) },
+      };
+      const fetchImpl = async () => {
+        posts += 1;
+        return { status: 202, text: async () => "" };
+      };
+      noteSessionActivity("ses_a");
+      await handleSessionIdle(client, "ses_b", cfg, fetchImpl);
+      expect(posts).toBe(0);
+      await handleSessionIdle(client, "ses_a", cfg, fetchImpl);
+      expect(posts).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R3;
+    }
+  });
+});
+
+describe("handleOpencodeEvent — real event sequences", () => {
+  const sdkEnvelope = (data: any) => ({ data, error: undefined, response: { status: 200 } });
+
+  function harness(title = "[wake] task") {
+    const calls = { get: 0, post: 0 };
+    const client = {
+      session: {
+        get: async () => {
+          calls.get += 1;
+          return sdkEnvelope({ id: "ses_1", title });
+        },
+      },
+    };
+    const fetchImpl = async () => {
+      calls.post += 1;
+      return { status: 202, text: async () => "" };
+    };
+    return { client, fetchImpl, calls };
+  }
+
+  const statusEvt = (type: string) => ({
+    type: "session.status",
+    properties: { sessionID: "ses_1", status: { type } },
+  });
+  const idleEvt = { type: "session.idle", properties: { sessionID: "ses_1" } };
+
+  test("session.status{idle} does NOT count as activity", () => {
+    expect(activitySessionId(statusEvt("idle"))).toBeNull();
+    expect(activitySessionId(statusEvt("busy"))).toBe("ses_1");
+    expect(activitySessionId(statusEvt("retry"))).toBe("ses_1");
+  });
+
+  test("startup replay (status{idle} then session.idle) notifies nothing", async () => {
+    process.env.AW_TEST_SECRET_H1 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H1"] });
+      const { client, fetchImpl, calls } = harness();
+      // Exactly what opencode emits when replaying a historical session.
+      await handleOpencodeEvent(client, statusEvt("idle"), cfg, fetchImpl);
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.get).toBe(0);
+      expect(calls.post).toBe(0);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H1;
+    }
+  });
+
+  test("a real turn (busy → idle status → session.idle) notifies exactly once", async () => {
+    process.env.AW_TEST_SECRET_H2 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H2"] });
+      const { client, fetchImpl, calls } = harness();
+      await handleOpencodeEvent(client, statusEvt("busy"), cfg, fetchImpl);
+      await handleOpencodeEvent(client, statusEvt("idle"), cfg, fetchImpl);
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(1);
+      // A duplicate idle with no new work must stay silent.
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H2;
+    }
+  });
+
+  test("message events also mark activity", async () => {
+    process.env.AW_TEST_SECRET_H3 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H3"] });
+      const { client, fetchImpl, calls } = harness();
+      await handleOpencodeEvent(
+        client,
+        { type: "message.updated", properties: { info: { sessionID: "ses_1" } } },
+        cfg,
+        fetchImpl
+      );
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(1);
+
+      await handleOpencodeEvent(
+        client,
+        { type: "message.part.updated", properties: { part: { sessionID: "ses_1" } } },
+        cfg,
+        fetchImpl
+      );
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(2);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H3;
+    }
+  });
+
+  test("session lifecycle events are not activity", async () => {
+    process.env.AW_TEST_SECRET_H4 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H4"] });
+      const { client, fetchImpl, calls } = harness();
+      for (const type of ["session.created", "session.updated", "session.compacted"]) {
+        await handleOpencodeEvent(
+          client,
+          { type, properties: { info: { id: "ses_1" }, sessionID: "ses_1" } },
+          cfg,
+          fetchImpl
+        );
+      }
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(0);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H4;
+    }
+  });
+
+  test("deletion forgets a pending activity mark", async () => {
+    process.env.AW_TEST_SECRET_H5 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H5"] });
+      const { client, fetchImpl, calls } = harness();
+      await handleOpencodeEvent(client, statusEvt("busy"), cfg, fetchImpl);
+      expect(_activeSessionCount()).toBe(1);
+      await handleOpencodeEvent(
+        client,
+        { type: "session.deleted", properties: { info: { id: "ses_1" } } },
+        cfg,
+        fetchImpl
+      );
+      expect(_activeSessionCount()).toBe(0);
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(0);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H5;
+    }
+  });
+
+  test("orphaned activity marks are bounded (LRU eviction)", async () => {
+    process.env.AW_TEST_SECRET_H6 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H6"] });
+      const { client, fetchImpl } = harness();
+      // Sessions that go busy and never idle or get deleted — stalled runs,
+      // lost terminal events, a server killed mid-turn.
+      for (let i = 0; i < 700; i += 1) {
+        await handleOpencodeEvent(
+          client,
+          { type: "session.status", properties: { sessionID: `ses_orphan_${i}`, status: { type: "busy" } } },
+          cfg,
+          fetchImpl
+        );
+      }
+      expect(_activeSessionCount()).toBeLessThanOrEqual(512);
+
+      // Assert real behaviour, not just parsing: the newest session still
+      // holds its mark and notifies, while the oldest was evicted and stays
+      // silent.
+      const newestClient = {
+        session: {
+          get: async () => sdkEnvelope({ id: "ses_orphan_699", title: "[wake] newest" }),
+        },
+      };
+      let posts = 0;
+      const countingFetch = async () => {
+        posts += 1;
+        return { status: 202, text: async () => "" };
+      };
+      await handleOpencodeEvent(
+        newestClient,
+        { type: "session.idle", properties: { sessionID: "ses_orphan_699" } },
+        cfg,
+        countingFetch
+      );
+      expect(posts).toBe(1);
+
+      await handleOpencodeEvent(
+        newestClient,
+        { type: "session.idle", properties: { sessionID: "ses_orphan_0" } },
+        cfg,
+        countingFetch
+      );
+      expect(posts).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H6;
+    }
+  });
+
+  test("repeat activity refreshes recency so a busy session is not evicted", async () => {
+    process.env.AW_TEST_SECRET_H7 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_H7"] });
+      const { client, fetchImpl, calls } = harness();
+      const busy = (id: string) => ({
+        type: "session.status",
+        properties: { sessionID: id, status: { type: "busy" } },
+      });
+      await handleOpencodeEvent(client, busy("ses_1"), cfg, fetchImpl);
+      for (let i = 0; i < 400; i += 1) {
+        await handleOpencodeEvent(client, busy(`ses_filler_${i}`), cfg, fetchImpl);
+        // Keep ses_1 fresh, as a genuinely active session would be.
+        await handleOpencodeEvent(client, busy("ses_1"), cfg, fetchImpl);
+      }
+      for (let i = 400; i < 900; i += 1) {
+        await handleOpencodeEvent(client, busy(`ses_filler_${i}`), cfg, fetchImpl);
+        await handleOpencodeEvent(client, busy("ses_1"), cfg, fetchImpl);
+      }
+      await handleOpencodeEvent(client, idleEvt, cfg, fetchImpl);
+      expect(calls.post).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_H7;
+    }
+  });
+
+  test("feature disabled records no activity at all (no unbounded growth)", async () => {
+    const { client, fetchImpl, calls } = harness();
+    await handleOpencodeEvent(client, statusEvt("busy"), null, fetchImpl);
+    await handleOpencodeEvent(
+      client,
+      { type: "message.updated", properties: { info: { sessionID: "ses_x" } } },
+      null,
+      fetchImpl
+    );
+    expect(_activeSessionCount()).toBe(0);
+    expect(calls.post).toBe(0);
   });
 });
