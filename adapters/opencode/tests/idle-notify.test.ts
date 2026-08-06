@@ -536,10 +536,14 @@ describe("postIdleEvent", () => {
     }
   });
 
-  test("live routing change AWAY from opencode un-suppresses despite a stale snapshot", async () => {
+  test("routing away on disk does NOT override the snapshot (file may be unapplied); a fresh hello_ack does", async () => {
     process.env.AW_TEST_SECRET_R2 = "k";
     try {
-      setAcceptedSources(["demo-claude"]); // stale: claims we still accept it
+      // Daemon's last confirmed answer says demo-claude routes to us…
+      setAcceptedSources(["demo-claude"]);
+      // …while the on-disk file says it routes elsewhere. The file could
+      // be a pending or rejected reload — the daemon may still apply the
+      // old routing, so publishing must stay refused.
       const configPath = tmpConfigFile({
         version: 1,
         sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_R2" } },
@@ -551,8 +555,17 @@ describe("postIdleEvent", () => {
         configPath,
         source: "demo-claude",
       });
-      const fetchImpl = async () => ({ status: 202, text: async () => "" });
-      expect(await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
+      let called = false;
+      const fetchImpl = async () => {
+        called = true;
+        return { status: 202, text: async () => "" };
+      };
+      expect(await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+      expect(called).toBe(false);
+
+      // A fresh hello_ack (resubscribe) confirming the change clears it.
+      setAcceptedSources(["demo-opencode"]);
+      expect(await postIdleEvent({ id: "s2", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
     } finally {
       delete process.env.AW_TEST_SECRET_R2;
     }

@@ -33,12 +33,14 @@
  * delegating session gets scheduled".
  *
  * Loop prevention: if the configured target source routes back to THIS
- * adapter (the daemon's hello_ack `accepted_sources` is the authority),
- * a published wake would be delivered into an opencode session, whose
- * turn would idle and publish again — an unbounded wake/idle loop that
- * event-id dedupe cannot stop (every cycle mints a fresh id). The
- * adapter therefore refuses to publish when `cfg.source` is one of its
- * own accepted sources. See `setAcceptedSources` / index.ts wiring.
+ * adapter, a published wake would be delivered into an opencode
+ * session, whose turn would idle and publish again — an unbounded
+ * wake/idle loop that event-id dedupe cannot stop (every cycle mints a
+ * fresh id). Two guards are UNION'd per publish: the live on-disk
+ * routing (catches changes the daemon may have applied since we
+ * subscribed) and the last hello_ack `accepted_sources` snapshot (the
+ * daemon's last confirmed answer — the file alone can't prove a reload
+ * was applied). See `publishRefusalReason` for the full rationale.
  */
 import { createHmac } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
@@ -155,17 +157,28 @@ function currentSecretUris(cfg: IdleNotifyConfig, live: any | null): string[] {
 }
 
 /**
- * Decide whether this publish must be refused, from the LIVE document.
- * Returns a human-readable reason or null to proceed.
+ * Decide whether this publish must be refused. Returns a human-readable
+ * reason or null to proceed.
  *
- * - Live document with an unsupported version: refuse everything — the
- *   v0/v1 boundary must hold even when the file changes under us.
- * - Live v0/v1 routing entry for the source: authoritative. Refuse iff
- *   it routes to the opencode adapter (wake/idle feedback loop); a
- *   routing change AWAY from opencode un-suppresses publishing even if
- *   the hello_ack snapshot is stale.
- * - No live routing entry (or unreadable document): fall back to the
- *   most recent hello_ack accepted_sources snapshot.
+ * Two independent loop guards, UNION'd — a publish must clear both:
+ *
+ * 1. The live on-disk document (when readable). An unsupported version
+ *    refuses everything (the v0/v1 boundary must hold even when the
+ *    file changes under us), and a routing entry sending the source to
+ *    the opencode adapter refuses that source.
+ * 2. The most recent hello_ack accepted_sources snapshot — the daemon's
+ *    last CONFIRMED routing answer for this adapter.
+ *
+ * Neither overrides the other, deliberately (review cycle 4, blocking):
+ * the file is not necessarily the daemon's APPLIED configuration — a
+ * SIGHUP may not have been sent yet, or the reload may have been
+ * rejected (main._require_resolvable_secrets and shape checks), in
+ * which case the daemon keeps its previous routing while the file says
+ * otherwise. Trusting the file to un-suppress would publish into a
+ * still-live loop. The cost of the conservative union: a routing change
+ * AWAY from opencode only takes effect once a fresh hello_ack clears
+ * the snapshot (adapter reconnect / opencode restart), not immediately
+ * on file edit.
  */
 function publishRefusalReason(cfg: IdleNotifyConfig, live: any | null): string | null {
   if (live) {
@@ -174,15 +187,17 @@ function publishRefusalReason(cfg: IdleNotifyConfig, live: any | null): string |
       return `live config at ${cfg.configPath} is version ${JSON.stringify(version)}; notify-on-idle supports v0/v1 only`;
     }
     const route = live.routing?.[cfg.source];
-    if (route && typeof route === "object" && typeof route.adapter === "string") {
-      if (route.adapter === "opencode") {
-        return `live config routes source ${JSON.stringify(cfg.source)} to the opencode adapter — publishing would create a wake/idle feedback loop`;
-      }
-      return null; // live routing is authoritative and points elsewhere
+    if (
+      route &&
+      typeof route === "object" &&
+      typeof route.adapter === "string" &&
+      route.adapter === "opencode"
+    ) {
+      return `live config routes source ${JSON.stringify(cfg.source)} to the opencode adapter — publishing would create a wake/idle feedback loop`;
     }
   }
   if (acceptedSources.has(cfg.source)) {
-    return `the daemon routes source ${JSON.stringify(cfg.source)} back to this opencode adapter (accepted_sources) — publishing would create a wake/idle feedback loop`;
+    return `the daemon's last hello_ack routes source ${JSON.stringify(cfg.source)} back to this opencode adapter (accepted_sources) — publishing would create a wake/idle feedback loop. If routing genuinely changed, restart opencode (or wait for a resubscribe) so the daemon confirms it.`;
   }
   return null;
 }
