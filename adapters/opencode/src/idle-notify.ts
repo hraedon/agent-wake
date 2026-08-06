@@ -509,11 +509,30 @@ export function noteSessionActivity(sessionId: string): void {
     const oldest = activeSessions.keys().next();
     if (oldest.done) break;
     activeSessions.delete(oldest.value);
-    log.warn(
-      `notify-on-idle: activity set at cap (${MAX_ACTIVE_SESSIONS}); evicted oldest session ${oldest.value} ` +
-        `— it will not notify if it later goes idle`
-    );
+    noteEviction(oldest.value);
   }
+}
+
+/**
+ * Eviction logging, summarized rather than per-session.
+ *
+ * Being at the cap is a sustained condition, not an event: once there, every
+ * subsequent mark evicts one, so per-session warnings would emit thousands of
+ * identical lines and bury everything else in the log. One line per
+ * `_EVICTION_LOG_EVERY` evictions carries the same information — the
+ * condition, its scale, and a representative session.
+ */
+const _EVICTION_LOG_EVERY = 100;
+let evictionCount = 0;
+
+function noteEviction(sessionId: string): void {
+  evictionCount += 1;
+  if (evictionCount % _EVICTION_LOG_EVERY !== 1) return;
+  log.warn(
+    `notify-on-idle: activity set at cap (${MAX_ACTIVE_SESSIONS}); ` +
+      `${evictionCount} eviction(s) so far, most recently session ${sessionId} — ` +
+      `evicted sessions will not notify if they later go idle`
+  );
 }
 
 /** Forget a session entirely (deletion) — it can never legitimately notify. */
@@ -524,6 +543,7 @@ export function forgetSession(sessionId: string): void {
 /** Test-only. */
 export function _resetActivity(): void {
   activeSessions.clear();
+  evictionCount = 0;
 }
 
 /** Test-only. */

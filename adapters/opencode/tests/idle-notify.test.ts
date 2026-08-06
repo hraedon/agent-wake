@@ -1058,13 +1058,35 @@ describe("handleOpencodeEvent — real event sequences", () => {
         );
       }
       expect(_activeSessionCount()).toBeLessThanOrEqual(512);
-      // The most recent session survived eviction and can still notify.
-      expect(
-        activitySessionId({
-          type: "session.status",
-          properties: { sessionID: "ses_orphan_699", status: { type: "busy" } },
-        })
-      ).toBe("ses_orphan_699");
+
+      // Assert real behaviour, not just parsing: the newest session still
+      // holds its mark and notifies, while the oldest was evicted and stays
+      // silent.
+      const newestClient = {
+        session: {
+          get: async () => sdkEnvelope({ id: "ses_orphan_699", title: "[wake] newest" }),
+        },
+      };
+      let posts = 0;
+      const countingFetch = async () => {
+        posts += 1;
+        return { status: 202, text: async () => "" };
+      };
+      await handleOpencodeEvent(
+        newestClient,
+        { type: "session.idle", properties: { sessionID: "ses_orphan_699" } },
+        cfg,
+        countingFetch
+      );
+      expect(posts).toBe(1);
+
+      await handleOpencodeEvent(
+        newestClient,
+        { type: "session.idle", properties: { sessionID: "ses_orphan_0" } },
+        cfg,
+        countingFetch
+      );
+      expect(posts).toBe(1);
     } finally {
       delete process.env.AW_TEST_SECRET_H6;
     }
