@@ -193,11 +193,21 @@ function publishRefusalReason(cfg: IdleNotifyConfig, live: any | null): string |
       typeof route.adapter === "string" &&
       route.adapter === "opencode"
     ) {
+      // Latch: even if a later file edit walks this back, the daemon may
+      // have applied THIS revision. Only a fresh hello_ack that excludes
+      // the source clears it (setAcceptedSources).
+      latchedSources.add(cfg.source);
       return `live config routes source ${JSON.stringify(cfg.source)} to the opencode adapter — publishing would create a wake/idle feedback loop`;
     }
   }
+  if (!ackConfirmed) {
+    return `no confirmed daemon subscription yet (no hello_ack since startup/disconnect) — cannot rule out that source ${JSON.stringify(cfg.source)} routes back to this adapter; failing closed`;
+  }
   if (acceptedSources.has(cfg.source)) {
     return `the daemon's last hello_ack routes source ${JSON.stringify(cfg.source)} back to this opencode adapter (accepted_sources) — publishing would create a wake/idle feedback loop. If routing genuinely changed, restart opencode (or wait for a resubscribe) so the daemon confirms it.`;
+  }
+  if (latchedSources.has(cfg.source)) {
+    return `source ${JSON.stringify(cfg.source)} was previously observed routed to this opencode adapter on disk; that revision may have been applied. Refusing until a fresh hello_ack confirms the source is no longer accepted here.`;
   }
   return null;
 }
@@ -416,16 +426,44 @@ const POST_TIMEOUT_MS = 10_000;
  * so that combination cannot arise (see secretUrisForSource docstring).
  */
 let acceptedSources: ReadonlySet<string> = new Set();
+/**
+ * Routing safety is STATEFUL (review cycle 5, blocking):
+ * - `ackConfirmed` — false until the first hello_ack and after every
+ *   disconnect. Without a confirmed daemon answer there is no safe
+ *   interpretation of "not in accepted_sources" (the initial empty set
+ *   would otherwise read as "safe"), so publishing fails closed.
+ * - `latchedSources` — source names OBSERVED routed to the opencode
+ *   adapter in the on-disk document at some publish attempt. The daemon
+ *   may have applied that revision even if a later file edit walked it
+ *   back without a (successful) SIGHUP — so once seen, the danger
+ *   persists until a subsequent hello_ack confirms the source is NOT
+ *   accepted by this adapter. That closes the apply→edit-without-apply
+ *   window where both a stale ack and the current file look clean while
+ *   the daemon still routes the source here.
+ */
+let ackConfirmed = false;
+const latchedSources = new Set<string>();
 const refusalReasonsLogged = new Set<string>();
 
 export function setAcceptedSources(sources: readonly string[]): void {
   acceptedSources = new Set(sources);
+  ackConfirmed = true;
+  for (const latched of [...latchedSources]) {
+    if (!acceptedSources.has(latched)) latchedSources.delete(latched);
+  }
   refusalReasonsLogged.clear();
+}
+
+/** Disconnected from the daemon — no confirmed routing answer until the next hello_ack. */
+export function invalidateAcceptedSources(): void {
+  ackConfirmed = false;
 }
 
 /** Test-only. */
 export function _resetLoopGuard(): void {
   acceptedSources = new Set();
+  ackConfirmed = false;
+  latchedSources.clear();
   refusalReasonsLogged.clear();
 }
 

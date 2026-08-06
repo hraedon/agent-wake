@@ -13,6 +13,7 @@ import {
   postIdleEvent,
   handleSessionIdle,
   setAcceptedSources,
+  invalidateAcceptedSources,
   _resetLoopGuard,
   IdleNotifyConfigError,
   type IdleNotifyConfig,
@@ -395,6 +396,7 @@ describe("postIdleEvent", () => {
   test("posts signed request with source/identity headers and a timeout signal", async () => {
     process.env.AW_TEST_SECRET_C = "topsecret";
     try {
+      setAcceptedSources(["demo-opencode"]);
       const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_C"] });
       let captured: { url: string; init: any } | null = null;
       const fetchImpl = async (url: string, init: any) => {
@@ -418,6 +420,7 @@ describe("postIdleEvent", () => {
   });
 
   test("missing secret drops without posting", async () => {
+    setAcceptedSources(["demo-opencode"]);
     const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_MISSING"], secretsFile: null });
     let called = false;
     const fetchImpl = async () => {
@@ -432,6 +435,7 @@ describe("postIdleEvent", () => {
   test("non-2xx ingest response returns false", async () => {
     process.env.AW_TEST_SECRET_D = "k";
     try {
+      setAcceptedSources(["demo-opencode"]);
       const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_D"] });
       const fetchImpl = async () => ({ status: 403, text: async () => "denied" });
       const ok = await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl);
@@ -475,6 +479,7 @@ describe("postIdleEvent", () => {
   test("live config flipping to v2 refuses publishing (boundary holds under SIGHUP reload)", async () => {
     process.env.AW_TEST_SECRET_V2 = "k";
     try {
+      setAcceptedSources(["demo-opencode"]);
       const configPath = tmpConfigFile({
         version: 1,
         sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_V2" } },
@@ -597,9 +602,109 @@ describe("postIdleEvent", () => {
     }
   });
 
+  test("refuses before the first hello_ack (fail closed pre-ack)", async () => {
+    process.env.AW_TEST_SECRET_P1 = "k";
+    try {
+      // No setAcceptedSources call: startup state, empty snapshot,
+      // nothing confirmed. Even a clean-looking live config must not
+      // publish.
+      const configPath = tmpConfigFile({
+        version: 1,
+        sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_P1" } },
+        routing: { "demo-claude": { adapter: "claude" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_P1"],
+        configPath,
+        source: "demo-claude",
+      });
+      let called = false;
+      const fetchImpl = async () => {
+        called = true;
+        return { status: 202, text: async () => "" };
+      };
+      expect(await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+      expect(called).toBe(false);
+    } finally {
+      delete process.env.AW_TEST_SECRET_P1;
+    }
+  });
+
+  test("disconnect invalidates confirmation until the next hello_ack", async () => {
+    process.env.AW_TEST_SECRET_P2 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_P2"], source: "demo-claude" });
+      const fetchImpl = async () => ({ status: 202, text: async () => "" });
+      expect(await postIdleEvent({ id: "s1", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
+
+      invalidateAcceptedSources();
+      expect(await postIdleEvent({ id: "s2", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+
+      setAcceptedSources(["demo-opencode"]);
+      expect(await postIdleEvent({ id: "s3", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
+    } finally {
+      delete process.env.AW_TEST_SECRET_P2;
+    }
+  });
+
+  test("apply→edit-without-apply: observed dangerous routing latches until an ack excludes the source", async () => {
+    process.env.AW_TEST_SECRET_P3 = "k";
+    try {
+      // Ack excludes demo-claude (stale relative to what follows).
+      setAcceptedSources(["demo-opencode"]);
+      const configPath = tmpConfigFile({
+        version: 1,
+        sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_P3" } },
+        routing: { "demo-claude": { adapter: "opencode" } }, // applied revision
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_P3"],
+        configPath,
+        source: "demo-claude",
+      });
+      let calls = 0;
+      const fetchImpl = async () => {
+        calls += 1;
+        return { status: 202, text: async () => "" };
+      };
+      // Observed dangerous → refused and latched.
+      expect(await postIdleEvent({ id: "s1", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+
+      // File edited back WITHOUT a (successful) reload — daemon may still
+      // route demo-claude to opencode. Both naive guards would clear here;
+      // the latch must hold.
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_P3" } },
+          routing: { "demo-claude": { adapter: "claude" } },
+          opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+        })
+      );
+      expect(await postIdleEvent({ id: "s2", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+      expect(calls).toBe(0);
+
+      // Fresh hello_ack that still includes the source keeps everything refused…
+      setAcceptedSources(["demo-claude"]);
+      expect(await postIdleEvent({ id: "s3", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+
+      // …and one that excludes it (daemon-confirmed safe) clears the latch.
+      setAcceptedSources(["demo-opencode"]);
+      expect(await postIdleEvent({ id: "s4", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
+      expect(calls).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_P3;
+    }
+  });
+
   test("suppresses a concurrent duplicate for the same session", async () => {
     process.env.AW_TEST_SECRET_F2 = "k";
     try {
+      setAcceptedSources(["demo-opencode"]);
       const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_F2"] });
       let calls = 0;
       let release: () => void;
@@ -629,6 +734,7 @@ describe("handleSessionIdle", () => {
   test("fetches session, gates on marker, posts when matched", async () => {
     process.env.AW_TEST_SECRET_E = "k";
     try {
+      setAcceptedSources(["demo-opencode"]);
       const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_E"] });
       let posted = false;
       const fetchImpl = async () => {

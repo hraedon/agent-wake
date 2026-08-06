@@ -46,6 +46,12 @@ export interface ClientOptions {
    * idle-notify uses it as a feedback-loop guard.
    */
   onAcceptedSources?: (sources: string[]) => void;
+  /**
+   * Called when the daemon connection closes. Between this and the next
+   * hello_ack there is NO confirmed routing answer — idle-notify uses it
+   * to invalidate its accepted_sources confirmation (fail closed).
+   */
+  onDisconnect?: () => void;
   /** Initial backoff in ms (defaults to 1000). Tests use a small value. */
   initialBackoffMs?: number;
   /** Maximum backoff in ms (defaults to 30000). */
@@ -127,6 +133,11 @@ export function oneSession(opts: ClientOptions): Promise<void> {
 
     const cleanup = () => {
       if (currentSocket === socket) currentSocket = null;
+      try {
+        opts.onDisconnect?.();
+      } catch (e: any) {
+        log.warn(`onDisconnect handler failed: ${e?.message ?? e}`);
+      }
       resolve();
     };
 
