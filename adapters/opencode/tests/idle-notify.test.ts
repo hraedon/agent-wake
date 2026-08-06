@@ -36,6 +36,7 @@ function cfgWith(overrides: Partial<IdleNotifyConfig> = {}): IdleNotifyConfig {
     secretEnvOverride: null,
     secretsFile: null,
     delivery: "next_session",
+    stallAfterRetries: 3,
     ...overrides,
   };
 }
@@ -933,7 +934,8 @@ describe("handleOpencodeEvent — real event sequences", () => {
   test("session.status{idle} does NOT count as activity", () => {
     expect(activitySessionId(statusEvt("idle"))).toBeNull();
     expect(activitySessionId(statusEvt("busy"))).toBe("ses_1");
-    expect(activitySessionId(statusEvt("retry"))).toBe("ses_1");
+    // retry is an attempt, not observed work — see activitySessionId.
+    expect(activitySessionId(statusEvt("retry"))).toBeNull();
   });
 
   test("startup replay (status{idle} then session.idle) notifies nothing", async () => {
@@ -1130,5 +1132,148 @@ describe("handleOpencodeEvent — real event sequences", () => {
     );
     expect(_activeSessionCount()).toBe(0);
     expect(calls.post).toBe(0);
+  });
+});
+
+describe("stall and failure reporting", () => {
+  const sdkEnvelope = (data: any) => ({ data, error: undefined, response: { status: 200 } });
+
+  function harness2(title = "[wake] delegated task") {
+    const posts: any[] = [];
+    const client = {
+      session: { get: async () => sdkEnvelope({ id: "ses_1", title }) },
+    };
+    const fetchImpl = async (_url: string, init: any) => {
+      posts.push(JSON.parse(init.body));
+      return { status: 202, text: async () => "" };
+    };
+    return { client, fetchImpl, posts };
+  }
+
+  const busy = { type: "session.status", properties: { sessionID: "ses_1", status: { type: "busy" } } };
+  const retry = (attempt: number, message = "rate limited") => ({
+    type: "session.status",
+    properties: { sessionID: "ses_1", status: { type: "retry", attempt, message, next: 0 } },
+  });
+  const idle = { type: "session.idle", properties: { sessionID: "ses_1" } };
+
+  test("sustained retries publish exactly one task_stalled naming the cause", async () => {
+    process.env.AW_TEST_SECRET_S1 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_S1"] });
+      const { client, fetchImpl, posts } = harness2();
+      await handleOpencodeEvent(client, busy, cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(1), cfg, fetchImpl);
+      expect(posts.length).toBe(0); // below threshold — a blip, not a stall
+      await handleOpencodeEvent(client, retry(3), cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(4), cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(9), cfg, fetchImpl);
+      expect(posts.length).toBe(1);
+      expect(posts[0].kind).toBe("task_stalled");
+      expect(posts[0].content).toContain("STUCK retrying");
+      expect(posts[0].content).toContain("rate limited");
+      expect(posts[0].content).toContain("another lineage");
+    } finally {
+      delete process.env.AW_TEST_SECRET_S1;
+    }
+  });
+
+  test("a stalled run that later completes still reports its completion", async () => {
+    process.env.AW_TEST_SECRET_S2 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_S2"] });
+      const { client, fetchImpl, posts } = harness2();
+      await handleOpencodeEvent(client, busy, cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(3), cfg, fetchImpl);
+      await handleOpencodeEvent(client, idle, cfg, fetchImpl);
+      expect(posts.map((p) => p.kind)).toEqual(["task_stalled", "task_complete"]);
+    } finally {
+      delete process.env.AW_TEST_SECRET_S2;
+    }
+  });
+
+  test("a new stall after a completed episode is reported again", async () => {
+    process.env.AW_TEST_SECRET_S3 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_S3"] });
+      const { client, fetchImpl, posts } = harness2();
+      await handleOpencodeEvent(client, busy, cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(3), cfg, fetchImpl);
+      await handleOpencodeEvent(client, idle, cfg, fetchImpl);
+      await handleOpencodeEvent(client, busy, cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(3), cfg, fetchImpl);
+      expect(posts.filter((p) => p.kind === "task_stalled").length).toBe(2);
+    } finally {
+      delete process.env.AW_TEST_SECRET_S3;
+    }
+  });
+
+  test("session.error publishes task_failed once with the message", async () => {
+    process.env.AW_TEST_SECRET_S4 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_S4"] });
+      const { client, fetchImpl, posts } = harness2();
+      await handleOpencodeEvent(client, busy, cfg, fetchImpl);
+      const err = {
+        type: "session.error",
+        properties: { sessionID: "ses_1", error: { name: "ApiError", data: { message: "insufficient quota" } } },
+      };
+      await handleOpencodeEvent(client, err, cfg, fetchImpl);
+      await handleOpencodeEvent(client, err, cfg, fetchImpl);
+      expect(posts.length).toBe(1);
+      expect(posts[0].kind).toBe("task_failed");
+      expect(posts[0].content).toContain("insufficient quota");
+    } finally {
+      delete process.env.AW_TEST_SECRET_S4;
+    }
+  });
+
+  test("trouble on an unwatched session (startup replay) is ignored", async () => {
+    process.env.AW_TEST_SECRET_S5 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_S5"] });
+      const { client, fetchImpl, posts } = harness2();
+      // No busy event: never observed working.
+      await handleOpencodeEvent(client, retry(9), cfg, fetchImpl);
+      await handleOpencodeEvent(
+        client,
+        { type: "session.error", properties: { sessionID: "ses_1", error: { message: "x" } } },
+        cfg,
+        fetchImpl
+      );
+      expect(posts.length).toBe(0);
+    } finally {
+      delete process.env.AW_TEST_SECRET_S5;
+    }
+  });
+
+  test("an unmarked-title session never reports trouble", async () => {
+    process.env.AW_TEST_SECRET_S6 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]);
+      const cfg = cfgWith({ secretUris: ["env://AW_TEST_SECRET_S6"] });
+      const { client, fetchImpl, posts } = harness2("ordinary interactive session");
+      await handleOpencodeEvent(client, busy, cfg, fetchImpl);
+      await handleOpencodeEvent(client, retry(5), cfg, fetchImpl);
+      expect(posts.length).toBe(0);
+    } finally {
+      delete process.env.AW_TEST_SECRET_S6;
+    }
+  });
+
+  test("stall reporting disabled with stall_after_retries: 0 threshold config", () => {
+    const cfg = parseIdleNotifyConfig({
+      opencode_notify_on_idle: { source: "s", identity: "i", stall_after_retries: 7 },
+    })!;
+    expect(cfg.stallAfterRetries).toBe(7);
+    expect(
+      parseIdleNotifyConfig({ opencode_notify_on_idle: { source: "s", identity: "i" } })!
+        .stallAfterRetries
+    ).toBe(3);
   });
 });

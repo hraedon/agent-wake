@@ -73,6 +73,13 @@ export interface IdleNotifyConfig {
   secretEnvOverride: string | null;
   secretsFile: string | null;
   delivery: "live_only" | "next_session" | "managed_session";
+  /**
+   * Retry attempts a session must reach before it is reported stalled.
+   * One transient 429 is noise; sustained backoff means the provider is
+   * throttled or out of quota and the delegator should re-dispatch
+   * elsewhere rather than wait. 0 disables stall reporting.
+   */
+  stallAfterRetries: number;
 }
 
 export class IdleNotifyConfigError extends Error {}
@@ -269,6 +276,10 @@ export function parseIdleNotifyConfig(raw: any, configPath: string | null = null
           ? block.secrets_file
           : defaultSecretsFile(),
     delivery,
+    stallAfterRetries:
+      Number.isFinite(block.stall_after_retries) && block.stall_after_retries >= 0
+        ? Number(block.stall_after_retries)
+        : 3,
   };
 }
 
@@ -381,20 +392,49 @@ export function shouldNotify(info: IdleSessionInfo, cfg: IdleNotifyConfig): bool
   return (info.title ?? "").includes(cfg.titleMarker);
 }
 
-export function buildIdleEvent(info: IdleSessionInfo, cfg: IdleNotifyConfig): {
+/**
+ * What happened to a delegated session. A completion is only one of the
+ * outcomes a delegator needs to hear about: a run that is stuck retrying
+ * against an exhausted provider, or that failed outright, otherwise leaves
+ * the delegator waiting on a timeout with no idea why. Reporting all three
+ * is what makes "hand work to opencode and go away" safe.
+ */
+export type NotifyKind = "task_complete" | "task_stalled" | "task_failed";
+
+function buildContent(kind: NotifyKind, info: IdleSessionInfo, detail: string): string {
+  const where = info.directory ? ` in ${info.directory}` : "";
+  const who = `opencode session ${info.id} ("${info.title}")${where}`;
+  const fetchHint = `Inspect it with: opencode export ${info.id}`;
+  switch (kind) {
+    case "task_stalled":
+      return (
+        `${who} is STUCK retrying${detail ? `: ${detail}` : ""}. ` +
+        `The provider is most likely throttled or out of quota — re-dispatch on ` +
+        `another lineage rather than waiting. ${fetchHint}`
+      );
+    case "task_failed":
+      return `${who} FAILED${detail ? `: ${detail}` : ""}. ${fetchHint}`;
+    default:
+      return `${who} is idle. Fetch the result with: opencode export ${info.id}`;
+  }
+}
+
+export function buildIdleEvent(
+  info: IdleSessionInfo,
+  cfg: IdleNotifyConfig,
+  kind: NotifyKind = "task_complete",
+  detail = ""
+): {
   body: string;
   eventId: string;
 } {
   const eventId = newEventId();
-  const where = info.directory ? ` in ${info.directory}` : "";
   const event = {
     v: 0,
     event_id: eventId,
     source: cfg.source,
-    kind: "task_complete",
-    content:
-      `opencode session ${info.id} ("${info.title}")${where} is idle. ` +
-      `Fetch the result with: opencode export ${info.id}`,
+    kind,
+    content: buildContent(kind, info, detail),
     wake: true,
     meta: {
       delivery: cfg.delivery,
@@ -499,6 +539,19 @@ const inFlight = new Set<string>();
 const activeSessions = new Map<string, true>();
 const MAX_ACTIVE_SESSIONS = 512;
 
+/**
+ * Trouble already reported this episode, keyed `${kind}:${sessionId}`.
+ * Cleared when the session next goes idle (episode over) or is deleted, so a
+ * retry storm yields one wake rather than one per attempt.
+ */
+const reportedEpisodes = new Set<string>();
+
+function clearEpisode(sessionId: string): void {
+  for (const key of [...reportedEpisodes]) {
+    if (key.endsWith(`:${sessionId}`)) reportedEpisodes.delete(key);
+  }
+}
+
 /** Record that a session did something observable in this plugin lifetime. */
 export function noteSessionActivity(sessionId: string): void {
   if (!sessionId) return;
@@ -538,11 +591,13 @@ function noteEviction(sessionId: string): void {
 /** Forget a session entirely (deletion) — it can never legitimately notify. */
 export function forgetSession(sessionId: string): void {
   activeSessions.delete(sessionId);
+  clearEpisode(sessionId);
 }
 
 /** Test-only. */
 export function _resetActivity(): void {
   activeSessions.clear();
+  reportedEpisodes.clear();
   evictionCount = 0;
 }
 
@@ -568,8 +623,14 @@ export function activitySessionId(evt: any): string | null {
   const props = evt?.properties ?? {};
   switch (type) {
     case "session.status": {
-      const status = props?.status?.type;
-      if (status !== "busy" && status !== "retry") return null;
+      // `busy` only. `retry` is evidence of ATTEMPTING, not of work observed:
+      // letting it mark activity would let a replayed retry (or the very
+      // retry storm we are trying to report) certify a session as live and
+      // then report trouble on it — the startup-replay bug in a new costume.
+      // A genuine run always goes busy before it can retry, so nothing real
+      // is missed. The stall branch gates on activity observed BEFORE the
+      // retry arrived.
+      if (props?.status?.type !== "busy") return null;
       return typeof props.sessionID === "string" ? props.sessionID : null;
     }
     case "message.updated": {
@@ -588,7 +649,9 @@ export function activitySessionId(evt: any): string | null {
 export async function postIdleEvent(
   info: IdleSessionInfo,
   cfg: IdleNotifyConfig,
-  fetchImpl: FetchLike = fetch as unknown as FetchLike
+  fetchImpl: FetchLike = fetch as unknown as FetchLike,
+  kind: NotifyKind = "task_complete",
+  detail = ""
 ): Promise<boolean> {
   const live = readLiveConfig(cfg);
   const refusal = publishRefusalReason(cfg, live);
@@ -600,8 +663,11 @@ export async function postIdleEvent(
     return false;
   }
 
-  if (inFlight.has(info.id)) {
-    log.warn(`notify-on-idle: publish already in flight for session ${info.id}; skipping duplicate`);
+  const flightKey = `${kind}:${info.id}`;
+  if (inFlight.has(flightKey)) {
+    log.warn(
+      `notify-on-idle: ${kind} publish already in flight for session ${info.id}; skipping duplicate`
+    );
     return false;
   }
 
@@ -614,9 +680,9 @@ export async function postIdleEvent(
     return false;
   }
 
-  const { body, eventId } = buildIdleEvent(info, cfg);
+  const { body, eventId } = buildIdleEvent(info, cfg, kind, detail);
   const sig = signBody(body, secret);
-  inFlight.add(info.id);
+  inFlight.add(flightKey);
   try {
     const res = await fetchImpl(cfg.ingestUrl, {
       method: "POST",
@@ -644,7 +710,7 @@ export async function postIdleEvent(
     log.warn(`notify-on-idle: ingest POST failed for session ${info.id}: ${e?.message ?? e}`);
     return false;
   } finally {
-    inFlight.delete(info.id);
+    inFlight.delete(flightKey);
   }
 }
 
@@ -680,11 +746,16 @@ export async function handleOpencodeEvent(
 ): Promise<void> {
   if (!cfg) return;
 
+  // Mark activity, then fall through: a `retry` status is BOTH evidence the
+  // session is live and the signal that it is stuck, so it must reach the
+  // stall check below. The type-specific handlers match nothing for ordinary
+  // busy/message events, so falling through is free.
+  // Mark activity, then fall through: `retry`/`error` events are not
+  // activity themselves (see activitySessionId) but must reach the trouble
+  // branches below, which gate on activity observed EARLIER — so a replayed
+  // trouble event for a session that never worked reports nothing.
   const activeId = activitySessionId(evt);
-  if (activeId) {
-    noteSessionActivity(activeId);
-    return;
-  }
+  if (activeId) noteSessionActivity(activeId);
 
   if (evt?.type === "session.deleted") {
     const deleted =
@@ -697,7 +768,74 @@ export async function handleOpencodeEvent(
 
   if (evt?.type === "session.idle" && typeof evt?.properties?.sessionID === "string") {
     await handleSessionIdle(client, evt.properties.sessionID, cfg, fetchImpl);
+    return;
   }
+
+  // A run stuck behind provider backoff. `attempt` counts retries, so wait
+  // for the configured threshold before crying wolf on a transient blip.
+  if (evt?.type === "session.status" && evt?.properties?.status?.type === "retry") {
+    const sessionID = evt.properties.sessionID;
+    const attempt = Number(evt.properties.status.attempt ?? 0);
+    if (typeof sessionID === "string" && attempt >= cfg.stallAfterRetries) {
+      const message = String(evt.properties.status.message ?? "").slice(0, 300);
+      await handleSessionTrouble(
+        client,
+        sessionID,
+        cfg,
+        "task_stalled",
+        `retry attempt ${attempt}${message ? ` — ${message}` : ""}`,
+        fetchImpl
+      );
+    }
+    return;
+  }
+
+  if (evt?.type === "session.error") {
+    const sessionID = evt?.properties?.sessionID;
+    if (typeof sessionID === "string") {
+      const err = evt.properties.error;
+      const detail = String(
+        err?.data?.message ?? err?.message ?? err?.name ?? (err ? JSON.stringify(err) : "")
+      ).slice(0, 300);
+      await handleSessionTrouble(client, sessionID, cfg, "task_failed", detail, fetchImpl);
+    }
+  }
+}
+
+/** Fetch a session and apply the marker/root gate. Null means "do not notify". */
+async function gatedSessionInfo(
+  client: SessionGetClientLike | undefined,
+  sessionID: string,
+  cfg: IdleNotifyConfig
+): Promise<IdleSessionInfo | null> {
+  if (!client?.session?.get) {
+    log.warn("notify-on-idle: opencode client unavailable; cannot inspect session");
+    return null;
+  }
+  let info: IdleSessionInfo | null = null;
+  try {
+    const result: any = await client.session.get({ path: { id: sessionID } });
+    const data = result?.data ?? result;
+    if (result && typeof result === "object" && "error" in result && result.error) {
+      log.warn(
+        `notify-on-idle: session.get non-2xx for ${sessionID}: ${JSON.stringify(result.error).slice(0, 200)}`
+      );
+      return null;
+    }
+    if (data && typeof data.id === "string") {
+      info = {
+        id: data.id,
+        title: typeof data.title === "string" ? data.title : "",
+        parentID: data.parentID ?? null,
+        directory: data.directory ?? data?.location?.directory ?? null,
+      };
+    }
+  } catch (e: any) {
+    log.warn(`notify-on-idle: session.get threw for ${sessionID}: ${e?.message ?? e}`);
+    return null;
+  }
+  if (!info) return null;
+  return shouldNotify(info, cfg) ? info : null;
 }
 
 export async function handleSessionIdle(
@@ -716,33 +854,36 @@ export async function handleSessionIdle(
     );
     return;
   }
-  if (!client?.session?.get) {
-    log.warn("notify-on-idle: opencode client unavailable; cannot inspect idle session");
-    return;
-  }
-  let info: IdleSessionInfo | null = null;
-  try {
-    const result: any = await client.session.get({ path: { id: sessionID } });
-    const data = result?.data ?? result;
-    if (result && typeof result === "object" && "error" in result && result.error) {
-      log.warn(
-        `notify-on-idle: session.get non-2xx for ${sessionID}: ${JSON.stringify(result.error).slice(0, 200)}`
-      );
-      return;
-    }
-    if (data && typeof data.id === "string") {
-      info = {
-        id: data.id,
-        title: typeof data.title === "string" ? data.title : "",
-        parentID: data.parentID ?? null,
-        directory: data.directory ?? data?.location?.directory ?? null,
-      };
-    }
-  } catch (e: any) {
-    log.warn(`notify-on-idle: session.get threw for ${sessionID}: ${e?.message ?? e}`);
-    return;
-  }
+  // The episode is over: a later stall or failure is a new one worth hearing.
+  clearEpisode(sessionID);
+  const info = await gatedSessionInfo(client, sessionID, cfg);
   if (!info) return;
-  if (!shouldNotify(info, cfg)) return;
   await postIdleEvent(info, cfg, fetchImpl);
+}
+
+/**
+ * Report a session that is stuck or has failed.
+ *
+ * Only sessions this plugin watched work are eligible (same replay guard as
+ * completion, but WITHOUT consuming the mark — the run is still live and its
+ * eventual idle must still notify). One report per kind per episode, where an
+ * episode ends at the next idle: a provider retrying twenty times must not
+ * produce twenty wakes.
+ */
+export async function handleSessionTrouble(
+  client: SessionGetClientLike | undefined,
+  sessionID: string,
+  cfg: IdleNotifyConfig | null,
+  kind: Exclude<NotifyKind, "task_complete">,
+  detail: string,
+  fetchImpl?: FetchLike
+): Promise<void> {
+  if (!cfg) return;
+  if (!activeSessions.has(sessionID)) return;
+  const episodeKey = `${kind}:${sessionID}`;
+  if (reportedEpisodes.has(episodeKey)) return;
+  reportedEpisodes.add(episodeKey);
+  const info = await gatedSessionInfo(client, sessionID, cfg);
+  if (!info) return;
+  await postIdleEvent(info, cfg, fetchImpl, kind, detail);
 }
