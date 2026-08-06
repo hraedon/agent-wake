@@ -472,6 +472,118 @@ describe("postIdleEvent", () => {
     }
   });
 
+  test("live config flipping to v2 refuses publishing (boundary holds under SIGHUP reload)", async () => {
+    process.env.AW_TEST_SECRET_V2 = "k";
+    try {
+      const configPath = tmpConfigFile({
+        version: 1,
+        sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_V2" } },
+        routing: { "demo-claude": { adapter: "claude" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_V2"],
+        configPath,
+        source: "demo-claude",
+      });
+      let calls = 0;
+      const fetchImpl = async () => {
+        calls += 1;
+        return { status: 202, text: async () => "" };
+      };
+      expect(await postIdleEvent({ id: "s1", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
+      expect(calls).toBe(1);
+
+      // The daemon SIGHUP-reloads this document without re-subscribing us.
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 2,
+          senders: { "demo-claude": { secret_env: "AW_TEST_SECRET_V2" } },
+        })
+      );
+      expect(await postIdleEvent({ id: "s2", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+      expect(calls).toBe(1);
+    } finally {
+      delete process.env.AW_TEST_SECRET_V2;
+    }
+  });
+
+  test("live routing change TO opencode refuses even with a stale accepted_sources snapshot", async () => {
+    process.env.AW_TEST_SECRET_R1 = "k";
+    try {
+      setAcceptedSources(["demo-opencode"]); // stale: does not include demo-claude
+      const configPath = tmpConfigFile({
+        version: 1,
+        sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_R1" } },
+        routing: { "demo-claude": { adapter: "opencode" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_R1"],
+        configPath,
+        source: "demo-claude",
+      });
+      let called = false;
+      const fetchImpl = async () => {
+        called = true;
+        return { status: 202, text: async () => "" };
+      };
+      expect(await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+      expect(called).toBe(false);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R1;
+    }
+  });
+
+  test("live routing change AWAY from opencode un-suppresses despite a stale snapshot", async () => {
+    process.env.AW_TEST_SECRET_R2 = "k";
+    try {
+      setAcceptedSources(["demo-claude"]); // stale: claims we still accept it
+      const configPath = tmpConfigFile({
+        version: 1,
+        sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_R2" } },
+        routing: { "demo-claude": { adapter: "claude" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_R2"],
+        configPath,
+        source: "demo-claude",
+      });
+      const fetchImpl = async () => ({ status: 202, text: async () => "" });
+      expect(await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl)).toBe(true);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R2;
+    }
+  });
+
+  test("no live routing entry falls back to the accepted_sources snapshot", async () => {
+    process.env.AW_TEST_SECRET_R3 = "k";
+    try {
+      setAcceptedSources(["demo-claude"]);
+      const configPath = tmpConfigFile({
+        version: 1,
+        sources: { "demo-claude": { secret_env: "AW_TEST_SECRET_R3" } },
+        opencode_notify_on_idle: { source: "demo-claude", identity: "i" },
+      });
+      const cfg = cfgWith({
+        secretUris: ["env://AW_TEST_SECRET_R3"],
+        configPath,
+        source: "demo-claude",
+      });
+      let called = false;
+      const fetchImpl = async () => {
+        called = true;
+        return { status: 202, text: async () => "" };
+      };
+      expect(await postIdleEvent({ id: "s", title: "[wake]" }, cfg, fetchImpl)).toBe(false);
+      expect(called).toBe(false);
+    } finally {
+      delete process.env.AW_TEST_SECRET_R3;
+    }
+  });
+
   test("suppresses a concurrent duplicate for the same session", async () => {
     process.env.AW_TEST_SECRET_F2 = "k";
     try {

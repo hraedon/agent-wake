@@ -122,28 +122,69 @@ function secretUrisForSource(raw: any, source: string): string[] {
 }
 
 /**
- * The LIVE secret-URI list for this publish. `agent-wake secrets rotate`
- * rewrites the config while opencode keeps running; a startup snapshot
- * survives one rotation (the old key stays in the 2-entry window) but
- * strands the adapter on the second (review cycle 2, blocking). An
- * explicit operator override pins the list and skips re-derivation.
- * Unreadable/unparsable config at publish time falls back to the
- * startup snapshot with a warning — better a possibly-stale window
- * entry than dropping the wake outright.
+ * The live on-disk config document, re-read per publish. The daemon
+ * reloads its config on SIGHUP without re-subscribing adapters, and
+ * `agent-wake secrets rotate` rewrites it while opencode keeps running —
+ * so EVERY publish-time decision (secret URIs, version boundary, loop
+ * routing) must come from the same live read, not startup snapshots
+ * (review cycle 3, blocking). null when unreadable/unparsable.
  */
-function currentSecretUris(cfg: IdleNotifyConfig): string[] {
-  if (cfg.secretEnvOverride) return [`env://${cfg.secretEnvOverride}`];
-  if (!cfg.configPath) return cfg.secretUris;
+function readLiveConfig(cfg: IdleNotifyConfig): any | null {
+  if (!cfg.configPath) return null;
   try {
-    const raw = JSON.parse(readFileSync(cfg.configPath, "utf-8"));
-    return secretUrisForSource(raw, cfg.source);
+    return JSON.parse(readFileSync(cfg.configPath, "utf-8"));
   } catch (e: any) {
     log.warn(
-      `notify-on-idle: could not re-read ${cfg.configPath} for current secret URIs ` +
-        `(${e?.message ?? e}); using startup snapshot`
+      `notify-on-idle: could not re-read ${cfg.configPath} (${e?.message ?? e}); ` +
+        `falling back to startup snapshot where safe`
     );
-    return cfg.secretUris;
+    return null;
   }
+}
+
+/**
+ * Secret URIs for this publish. An explicit operator override pins the
+ * list and skips re-derivation; a live document re-derives (rotation
+ * support); an unreadable document falls back to the startup snapshot —
+ * better a possibly-stale window entry than dropping the wake outright.
+ */
+function currentSecretUris(cfg: IdleNotifyConfig, live: any | null): string[] {
+  if (cfg.secretEnvOverride) return [`env://${cfg.secretEnvOverride}`];
+  if (live) return secretUrisForSource(live, cfg.source);
+  return cfg.secretUris;
+}
+
+/**
+ * Decide whether this publish must be refused, from the LIVE document.
+ * Returns a human-readable reason or null to proceed.
+ *
+ * - Live document with an unsupported version: refuse everything — the
+ *   v0/v1 boundary must hold even when the file changes under us.
+ * - Live v0/v1 routing entry for the source: authoritative. Refuse iff
+ *   it routes to the opencode adapter (wake/idle feedback loop); a
+ *   routing change AWAY from opencode un-suppresses publishing even if
+ *   the hello_ack snapshot is stale.
+ * - No live routing entry (or unreadable document): fall back to the
+ *   most recent hello_ack accepted_sources snapshot.
+ */
+function publishRefusalReason(cfg: IdleNotifyConfig, live: any | null): string | null {
+  if (live) {
+    const version = live.version ?? 0;
+    if (version !== 0 && version !== 1) {
+      return `live config at ${cfg.configPath} is version ${JSON.stringify(version)}; notify-on-idle supports v0/v1 only`;
+    }
+    const route = live.routing?.[cfg.source];
+    if (route && typeof route === "object" && typeof route.adapter === "string") {
+      if (route.adapter === "opencode") {
+        return `live config routes source ${JSON.stringify(cfg.source)} to the opencode adapter — publishing would create a wake/idle feedback loop`;
+      }
+      return null; // live routing is authoritative and points elsewhere
+    }
+  }
+  if (acceptedSources.has(cfg.source)) {
+    return `the daemon routes source ${JSON.stringify(cfg.source)} back to this opencode adapter (accepted_sources) — publishing would create a wake/idle feedback loop`;
+  }
+  return null;
 }
 
 /**
@@ -258,8 +299,11 @@ function lookupSecretInFile(secretsFile: string | null, name: string): FileLooku
  * Read at send time, not cached, so a rotated secret takes effect
  * without a server restart.
  */
-export function resolveSecret(cfg: IdleNotifyConfig): string | null {
-  for (const uri of currentSecretUris(cfg)) {
+export function resolveSecret(
+  cfg: IdleNotifyConfig,
+  live: any | null = readLiveConfig(cfg)
+): string | null {
+  for (const uri of currentSecretUris(cfg, live)) {
     if (!uri.startsWith("env://")) {
       log.warn(`notify-on-idle: unsupported secret backend ${JSON.stringify(uri)}; skipping`);
       continue;
@@ -357,17 +401,17 @@ const POST_TIMEOUT_MS = 10_000;
  * so that combination cannot arise (see secretUrisForSource docstring).
  */
 let acceptedSources: ReadonlySet<string> = new Set();
-let loopWarned = false;
+const refusalReasonsLogged = new Set<string>();
 
 export function setAcceptedSources(sources: readonly string[]): void {
   acceptedSources = new Set(sources);
-  loopWarned = false;
+  refusalReasonsLogged.clear();
 }
 
 /** Test-only. */
 export function _resetLoopGuard(): void {
   acceptedSources = new Set();
-  loopWarned = false;
+  refusalReasonsLogged.clear();
 }
 
 /** Sessions with a POST already in flight — suppress concurrent duplicates. */
@@ -378,15 +422,12 @@ export async function postIdleEvent(
   cfg: IdleNotifyConfig,
   fetchImpl: FetchLike = fetch as unknown as FetchLike
 ): Promise<boolean> {
-  if (acceptedSources.has(cfg.source)) {
-    if (!loopWarned) {
-      loopWarned = true;
-      log.error(
-        `notify-on-idle: refusing to publish as source ${JSON.stringify(cfg.source)} — ` +
-          `the daemon routes that source back to this opencode adapter (accepted_sources), ` +
-          `which would create a wake/idle feedback loop. Point opencode_notify_on_idle.source ` +
-          `at a source routed to a different adapter.`
-      );
+  const live = readLiveConfig(cfg);
+  const refusal = publishRefusalReason(cfg, live);
+  if (refusal) {
+    if (!refusalReasonsLogged.has(refusal)) {
+      refusalReasonsLogged.add(refusal);
+      log.error(`notify-on-idle: refusing to publish — ${refusal}`);
     }
     return false;
   }
@@ -396,7 +437,7 @@ export async function postIdleEvent(
     return false;
   }
 
-  const secret = resolveSecret(cfg);
+  const secret = resolveSecret(cfg, live);
   if (!secret) {
     log.warn(
       `notify-on-idle: no signing secret resolvable from ${JSON.stringify(cfg.secretUris)} ` +
